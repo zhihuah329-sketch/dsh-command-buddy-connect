@@ -225,6 +225,8 @@ const FIRST_READ_RETRY_MS = 1200;
 			authImporting: "导入中…",
 			authClose: "收起",
 			authOpened: "已打开 WorkBuddy，请完成登录后点「扫描凭据」。",
+			authRaised: "WorkBuddy 已在运行，已把它切到前台。请完成登录后点「扫描凭据」。",
+			authFresh: "已启动 WorkBuddy，请完成登录后点「扫描凭据」。",
 			authOpenFailed: "打开失败",
 			authNotFound: "本机没有找到 WorkBuddy 客户端",
 			authFound: "已找到客户端",
@@ -1004,7 +1006,7 @@ const FIRST_READ_RETRY_MS = 1200;
 						return;
 					}
 					setAuthNote(opened.ok === true
-						? { ok: true, message: TEXT.authOpened }
+						? { ok: true, message: opened.raised === true ? TEXT.authRaised : TEXT.authFresh }
 						: { ok: false, message: String(opened.error ?? TEXT.authOpenFailed) });
 				}, () => setAuthBusy(null));
 			};

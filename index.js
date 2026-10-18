@@ -673,10 +673,22 @@ async function openWorkBuddyForSite(site, configured) {
   }
 
   const image = basename(resolved.path).replace(/\.exe$/i, '')
-  // Already running: bringing it to the foreground is the client's own job, and
-  // launching a second copy would just hand off anyway.
+  // Already running: the point of the button is that the user sees the sign-in
+  // window, so it has to be brought forward. Reporting success without raising
+  // the window makes the button look broken — the client is running, but behind
+  // the browser, and nothing visibly happens.
   if (isProcessRunning(image)) {
-    return { ok: true, site, path: resolved.path, source: resolved.source, name, alreadyRunning: true }
+    const raised = raiseWindow(image)
+    return {
+      ok: raised.ok,
+      site,
+      path: resolved.path,
+      source: resolved.source,
+      name,
+      alreadyRunning: true,
+      raised: raised.ok,
+      ...(raised.ok ? {} : { error: raised.error })
+    }
   }
 
   try {
@@ -724,6 +736,89 @@ function isProcessRunning(image) {
     return out.toLowerCase().includes(`${image.toLowerCase()}.exe`)
   } catch {
     return false
+  }
+}
+
+/**
+ * Bring a running client's window to the foreground.
+ *
+ * ## Why this needs a Win32 call
+ *
+ * Returning "already running" is not enough for an authorize button: the client
+ * is behind the browser, so the user presses the button and sees nothing, which
+ * reads as a broken button even though the process is healthy.
+ *
+ * Windows refuses `SetForegroundWindow` from a background process, so the
+ * foreground lock is released first by attaching to the current foreground
+ * thread's input queue. Both `ShowWindow` and `SetForegroundWindow` are needed:
+ * a window minimised to the taskbar is restored by the first, and the second is
+ * what actually puts it in front.
+ *
+ * @param image - process image name without `.exe`.
+ * @returns whether a window was found and raised.
+ */
+function raiseWindow(image) {
+  if (process.platform !== 'win32') {
+    return { ok: false, error: '只有 Windows 需要置顶窗口。' }
+  }
+  // The script goes to a temporary file rather than `-Command`: the here-string
+  // and the DllImport attributes do not survive PowerShell's command-line
+  // quoting, which is how the first attempt failed with parse errors.
+  const script = `
+$ErrorActionPreference = 'Stop'
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class WinRaiser {
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint p);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool f);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+}
+"@
+$p = Get-Process -Name '${image}' -ErrorAction SilentlyContinue |
+     Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+if ($null -eq $p) { Write-Output 'NOWINDOW'; exit 0 }
+$h = $p.MainWindowHandle
+if ([WinRaiser]::IsIconic($h)) { [void][WinRaiser]::ShowWindow($h, 9) }
+$fg = [WinRaiser]::GetForegroundWindow()
+$t1 = [WinRaiser]::GetWindowThreadProcessId($fg, [ref]$null)
+$t2 = [WinRaiser]::GetWindowThreadProcessId($h, [ref]$null)
+# Windows only honours a foreground change from the thread that owns the
+# current foreground window, so join that thread's input queue first.
+if ($t1 -ne $t2) { [void][WinRaiser]::AttachThreadInput($t1, $t2, $true) }
+[void][WinRaiser]::BringWindowToTop($h)
+$ok = [WinRaiser]::SetForegroundWindow($h)
+if ($t1 -ne $t2) { [void][WinRaiser]::AttachThreadInput($t1, $t2, $false) }
+if ($ok) { Write-Output 'RAISED' } else { Write-Output 'REFUSED' }
+`
+  const scriptPath = join(tmpdir(), `dsh-command-buddy-connect-raise-${process.pid}.ps1`)
+  try {
+    writeFileSync(scriptPath, script, 'utf8')
+    const out = execFileSync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
+      { encoding: 'utf8', windowsHide: true, timeout: 20_000 }
+    )
+    if (out.includes('RAISED')) return { ok: true }
+    if (out.includes('NOWINDOW')) {
+      return { ok: false, error: `客户端在运行，但没有可见窗口。请从任务栏打开${image}，或重启它。` }
+    }
+    return { ok: false, error: `${image}的窗口没能切到前台。它可能在托盘里，请手动点开一次。` }
+  } catch (error) {
+    return {
+      ok: false,
+      error: `无法唤起${image}窗口：${error instanceof Error ? error.message : String(error)}`
+    }
+  } finally {
+    try {
+      rmSync(scriptPath, { force: true })
+    } catch {
+      // Temp file; leaving it is harmless.
+    }
   }
 }
 
