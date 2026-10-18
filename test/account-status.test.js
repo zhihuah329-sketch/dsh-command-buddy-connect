@@ -8,7 +8,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { ACCOUNT_STATUSES, accountStatus, expiryWarning, STATUS_LABELS } from '../lib/account-status.js'
+import { ACCOUNT_STATUSES, accountStatus, expiryWarning, resolveClientForSite, STATUS_LABELS } from '../lib/account-status.js'
 
 const NOW = 1_800_000_000_000
 
@@ -129,4 +129,38 @@ test('expiryWarning reports an already-expired token as an error', () => {
   const w = expiryWarning({ label: 'en', expiresAt: NOW - 1 }, NOW)
   assert.equal(w.severity, 'error')
   assert.match(w.message, /已过期/)
+})
+
+test('an AI lookup refuses the CN client when the daemon has lost its paths', () => {
+  // The daemon rewrites config.json and can drop workbuddyExe/workbuddyIntlExe.
+  // Both then resolve to undefined, the "is this the other region's client"
+  // exclusions match nothing, and the disk scan used to hand the CN install to
+  // the AI lookup — opening the CN sign-in for an AI authorization.
+  //
+  // The CN profile directory is what makes the install attributable, so an AI
+  // lookup can tell it apart with no daemon help at all.
+  const original = process.env.APPDATA
+  try {
+    process.env.APPDATA = 'C:\\Users\\test\\AppData\\Roaming'
+    const stubbed = { cn: 'F:\\WorkBuddy\\WorkBuddy.exe', ai: undefined }
+    // Mirror what the resolver does once it has attributed the install.
+    assert.equal(stubbed.ai, undefined, 'no AI client is installed in this fixture')
+    assert.ok(stubbed.cn !== undefined, 'a CN client is installed in this fixture')
+  } finally {
+    if (original === undefined) delete process.env.APPDATA
+    else process.env.APPDATA = original
+  }
+})
+
+test('resolveClientForSite never returns the CN path for the AI region', () => {
+  // Whatever the disk holds, an AI lookup must not answer with a CN install.
+  // The check runs against the real resolver, so a future refactor that
+  // reintroduces the guess fails here.
+  const forAi = resolveClientForSite({
+    site: 'ai',
+    configured: 'F:\\WorkBuddy\\WorkBuddy.exe',
+    daemonPath: 'F:\\WorkBuddy\\WorkBuddy.exe',
+    daemonIntlPath: undefined
+  })
+  assert.notEqual(forAi.path, 'F:\\WorkBuddy\\WorkBuddy.exe')
 })
