@@ -19,6 +19,13 @@
     "cordis.patch.yml",
     "README.md"
   ],
+  "scripts": {
+    "test": "node --test test/proxy.test.js test/account-status.test.js test/command-code.test.js test/client-css.test.js test/capture-identity.test.js",
+    "check": "node test/integrity-check.mjs",
+    "e2e": "node test/e2e-live.mjs",
+    "verify": "npm run test && npm run check",
+    "pack:tgz": "npm pack --pack-destination dist"
+  },
   "license": "MIT",
   "keywords": [
     "dsh-plugin",
