@@ -196,7 +196,7 @@ const FIRST_READ_RETRY_MS = 1200;
 			authScan: "扫描凭据",
 			authScanning: "扫描中…",
 			authStep3: "3. 写入号池",
-			authStep3Hint: "凭据可读时，通过 守护进程 的导入接口写入号池。",
+			authStep3Hint: "凭据可读时，写入号池。",
 			authImport: "导入到号池",
 			authImporting: "导入中…",
 			authClose: "收起",
@@ -1065,7 +1065,7 @@ const FIRST_READ_RETRY_MS = 1200;
 				problem = { kind: "插件状态接口返回了错误。", detail: serverError };
 			} else if (status !== null && pools !== null && pools.ok === false) {
 				problem = {
-					kind: "守护进程 账号库无法读取，因此两个区域号池都不可用。",
+					kind: "账号库无法读取，因此两个区域号池都不可用。",
 					detail: String(pools.reason === undefined ? "" : pools.reason)
 						+ (isText(pools.error) ? "：" + pools.error : "")
 				};
@@ -1073,7 +1073,7 @@ const FIRST_READ_RETRY_MS = 1200;
 				&& pools.pools.cn === 0 && pools.pools.ai === 0) {
 				problem = {
 					kind: "两个区域号池都没有可用账号，模型调用会失败。",
-					detail: "请在 守护进程 中导入账号；若导入后仍为空，用 buddy_connect_diagnose_import 检查凭据文件。"
+					detail: "请导入账号；若导入后仍为空，用 buddy_connect_diagnose_import 检查凭据文件。"
 				};
 			} else if (status !== null && checkin !== null && checkin.checkedIn !== true
 				&& isText(checkin.error)) {

@@ -1,6 +1,6 @@
 /**
- * buddy-connect — WorkBuddy check-in, plus local 守护进程 region pools served
- * either by the 本地守护进程 or entirely inside this process.
+ * dsh-command-buddy-connect — WorkBuddy check-in, plus local region pools served
+ * either by the local daemon or entirely inside this process.
  *
  * Opening DSH performs the day's WorkBuddy check-in, repeats it while DSH runs
  * so a session left open rolls into the new day, and reports the result on the
@@ -14,7 +14,7 @@
  *   its own check-in scheduler.
  * - `buddy-connect` (from `lib/local-adapter.js`) needs no daemon: it reads the
  *   same encrypted account vault and applies the same routing rules in-process.
- *   This is what makes the pools usable when 守护进程 is not installed, and it
+ *   This is what makes the pools usable when the daemon is not running, and it
  *   is where the reverse-proxy semantics live: region isolation,
  *   least-in-flight rotation, account-scoped conversation ids,
  *   rotate-only-on-retryable errors, and SSE normalisation.
@@ -22,10 +22,10 @@
  * Both can be enabled together: they are separate providers, so the model
  * picker shows which implementation served a call.
  *
- * ## Why the check-in does not go through 守护进程
+ * ## Why the check-in does not go through the daemon
  *
  * An earlier version delegated check-in to the daemon, which made the plugin do
- * nothing at all wherever 守护进程 was absent. Check-in now calls WorkBuddy's
+ * nothing at all wherever the daemon was absent. Check-in now calls WorkBuddy's
  * billing API directly, reusing the credential reader in `lib/workbuddy.js`.
  *
  * ## Shape
@@ -105,7 +105,7 @@ export const Config = z.object({
     .description('Publish the buddy_* tools to the agent.'),
   enableProvider: z.boolean()
     .default(true)
-    .description('Register the local 本地守护进程 as a model provider when it is installed.'),
+    .description('Register the local daemon as a model provider when it is runntalled.'),
   enableLocalPool: z.boolean()
     .default(true)
     .description('Serve the region pools from the account vault directly, without needing the 本地守护进程.'),
@@ -116,7 +116,7 @@ export const Config = z.object({
     .default('https://api.commandcode.ai')
     .description('Command Code API base URL. Change only for a staging endpoint.'),
   dataDir: z.string()
-    .description('守护进程数据目录. Leave unset to use BUDDYHUB_DATA, then %USERPROFILE%\\.buddyhub.'),
+    .description('守护进程数据目录。留空则依次使用 BUDDYHUB_DATA、%USERPROFILE%\\.buddyhub.'),
   workbuddyPath: z.string()
     .description('Path to the WorkBuddy desktop client, used by the "authorize account" button. Leave unset to use the vendor default, then a search of the usual install roots.'),
   authDirs: z.array(z.string())
@@ -124,12 +124,12 @@ export const Config = z.object({
     .description('Extra directories to scan for WorkBuddy credential files when authorizing an account.'),
   contextWindow: z.natural()
     .default(1_000_000)
-    .description('Context window advertised for the 守护进程 models.')
+    .description('Context window advertised for the daemon models.')
 })
 
 /**
  * Register the check-in scheduler, its status route, the agent tools, and the
- * optional 守护进程 model provider.
+ * optional daemon model provider.
  *
  * @param ctx - the plugin context.
  * @param config - the validated deployment configuration.
@@ -139,7 +139,7 @@ export function apply(ctx, config) {
     enabled: config.autoCheckin !== false,
     intervalMs: (config.intervalMinutes ?? 30) * 60 * 1000,
     logger: ctx.logger,
-    // Check-in prefers the CN account already imported into 守护进程, which
+    // Check-in prefers the CN account already imported into the daemon, which
     // needs no other plugin and no Electron binary.
     dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined
   })
@@ -161,7 +161,7 @@ export function apply(ctx, config) {
   if (attachments === undefined) {
     ctx.logger.info('dsh-command-buddy-connect: 没有 attachments 服务，图片输入将按文本处理')
   }
-  // The two clients 守护进程 recorded. Read once at mount: these are install
+  // The two clients the daemon recorded. Read once at mount: these are install
   // paths that do not change while DSH runs, and reading them per request would
   // mean touching the daemon's config on every page poll.
   const daemonClients = readDaemonConfig()
@@ -292,7 +292,7 @@ export function apply(ctx, config) {
                 captureResult: result
               })
             }
-            // Persist into 守护进程 through its own import route so the new
+            // Persist through the daemon's own import route so the new
             // account appears in the same pool the page shows.
             const written = await writeCapturedCredential(result, config)
             return send(200, {
@@ -592,7 +592,7 @@ function openWorkBuddyForSite(site, configured) {
   }
 }
 
-/** Read the two client paths 守护进程 recorded, ignoring an unreadable config. */
+/** Read the two client paths the daemon recorded, ignoring an unreadable config. */
 function readDaemonConfig() {
   try {
     const config = readConfig(resolveDataDir(undefined)).config
