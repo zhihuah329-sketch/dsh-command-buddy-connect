@@ -61,6 +61,9 @@ import { CaptureSession, describeCapture, runCapture } from './lib/capture.js'
 import { CommandCodeAdapter, CC_PROVIDER_ID, CC_PROVIDER_NAME } from './lib/cc-adapter.js'
 import { RouteSwitches } from './lib/router-state.js'
 import { readConfig, resolveDataDir } from './lib/discovery.js'
+// The bulk check-in preference handler reads the vault to learn the account ids;
+// without this import that action threw a ReferenceError.
+import { readVault } from './lib/vault.js'
 import {
   maskKey,
   readCommandCodeKey,
