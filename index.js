@@ -64,6 +64,7 @@ import { readConfig, resolveDataDir } from './lib/discovery.js'
 // The bulk check-in preference handler reads the vault to learn the account ids;
 // without this import that action threw a ReferenceError.
 import { readVault } from './lib/vault.js'
+import { detectTunnel } from './lib/tunnel.js'
 import {
   maskKey,
   readCommandCodeKey,
@@ -326,8 +327,33 @@ export function apply(ctx, config) {
           } else if (body?.action === 'capture-describe') {
             // Consent comes first: the page must be able to state exactly what
             // a capture installs and intercepts before the user agrees to it.
-            return send(200, { ...scheduler.snapshot(), capture: describeCapture() })
+            // A network-layer tunnel is included here for the same reason: it is
+            // a precondition the user has to know about *before* restarting the
+            // client, not a failure they discover ten minutes later.
+            return send(200, {
+              ...scheduler.snapshot(),
+              capture: describeCapture(),
+              tunnel: detectTunnel()
+            })
           } else if (body?.action === 'capture-start') {
+            // Refuse to start when a tunnel is active. Starting anyway means the
+            // user restarts the client, signs in, waits, and gets nothing —
+            // while the reason was knowable up front.
+            const tunnel = detectTunnel()
+            if (tunnel.tunnel === true) {
+              return send(409, {
+                ...scheduler.snapshot(),
+                tunnel,
+                captureState: {
+                  running: false,
+                  stage: 'blocked',
+                  message: null,
+                  ok: false,
+                  error: tunnel.advice,
+                  written: null
+                }
+              })
+            }
             // Non-blocking on purpose. A capture waits for the user to restart
             // the client and sign in, which can take minutes; holding one HTTP
             // request open for that gave the page no way to show progress or
@@ -340,6 +366,7 @@ export function apply(ctx, config) {
             return send(200, {
               ...scheduler.snapshot(),
               ...(localPool === undefined ? {} : { pools: localPool.poolStatus() }),
+              tunnel,
               captureState: state
             })
           } else if (body?.action === 'capture-cancel') {
@@ -531,6 +558,11 @@ export function apply(ctx, config) {
           // The page polls this while a capture runs, so "waiting for you" is
           // distinguishable from a hung request. The token is never included.
           captureState: captureSession.snapshot(),
+          // Included here, not only in `capture-describe`, because the page
+          // renders the capture panel from its first status read. Without this
+          // the panel cannot warn about a tunnel until the user opens it, and
+          // the warning is only useful before the button is pressed.
+          tunnel: detectTunnel(),
           routes: routeStates(config, {
             localPool,
             switches,
@@ -864,9 +896,15 @@ function readDaemonConfig() {
 async function writeCapturedCredential(capture, config) {
   const temp = join(tmpdir(), `buddy-connect-captured-${Date.now()}.info`)
   try {
-    // `auth.domain` decides the region, so it must be the captured domain.
+    // The daemon matches an import to an existing account by a hash of
+    // `site:uid:enterpriseId`. Both fields therefore have to be the real ones:
+    // with either missing, the import derives a different id, creates an empty
+    // duplicate, and the capture looks like it silently did nothing.
     const record = {
-      account: { uid: capture.uid ?? '' },
+      account: {
+        uid: capture.uid ?? '',
+        enterpriseId: capture.enterpriseId ?? ''
+      },
       auth: {
         accessToken: capture.token,
         domain: capture.domain ?? 'copilot.tencent.com',

@@ -250,6 +250,7 @@ const FIRST_READ_RETRY_MS = 1200;
 			captureStart: "开始抓取",
 			captureCancel: "取消",
 			captureOk: "已抓到凭据并写入号池。",
+			tunnelTitle: "网络层代理正在运行，抓取无法生效",
 			captureFailed: "抓取失败",
 			captureWaiting: "正在等待凭据…请在 WorkBuddy 登录并发一条消息。",
 			captureTimeout: "抓取超时，已自动清理证书和代理。",
@@ -374,6 +375,8 @@ const FIRST_READ_RETRY_MS = 1200;
 
 /* ---- command code key entry ---- */
 .bh-capture { margin-top:10px; padding:10px 12px; border:1px solid var(--dsw-alias-state-warn-primary); border-radius:var(--dsw-radius-md); background:var(--dsw-alias-bg-base); }
+.bh-capture-blocked { border:1px solid var(--dsw-alias-state-error-primary); border-radius:var(--dsw-radius-md); padding:9px 11px; margin-bottom:10px; font-size:11px; line-height:1.6; color:var(--dsw-alias-state-error-primary); }
+.bh-capture-blocked-title { font-weight:600; margin-bottom:4px; }
 .bh-capture-warn { font-size:11px; font-weight:600; color:var(--dsw-alias-state-warn-primary); }
 .bh-capture-list { margin:6px 0 0; padding-left:18px; font-size:11px; line-height:1.7; color:var(--dsw-alias-label-secondary); }
 .bh-auth { margin-top:12px;  padding-top:12px; border-top:1px solid var(--dsw-alias-border-l1); }
@@ -1466,6 +1469,7 @@ const FIRST_READ_RETRY_MS = 1200;
 			// and — for Command Code — its own key field. Splitting them this way
 			// matches how the pools actually behave: CN, AI and Command Code are
 			// independent, and a problem in one says nothing about the others.
+			const tunnel = isObject(status) && isObject(status.tunnel) ? status.tunnel : null;
 			const routeRows = isObject(status) && Array.isArray(status.routes) ? status.routes : [];
 			const models = pools !== null && Array.isArray(pools.models) ? pools.models : [];
 			const routeOf = (id) => routeRows.find((r) => r && r.id === id) ?? null;
@@ -1631,6 +1635,14 @@ const FIRST_READ_RETRY_MS = 1200;
 					),
 					captureOpen && plan !== null && plan.captureRequired === true
 						? React.createElement("div", { className: "bh-capture" },
+							// A network-layer tunnel makes the whole method useless, so
+							// say so before the user restarts the client rather than
+							// after a ten-minute wait.
+							isObject(tunnel) && tunnel.tunnel === true
+								? React.createElement("div", { className: "bh-capture-blocked" },
+									React.createElement("div", { className: "bh-capture-blocked-title" }, TEXT.tunnelTitle),
+									React.createElement("div", null, String(tunnel.advice ?? "")))
+								: null,
 							React.createElement("div", { className: "bh-capture-warn" }, TEXT.captureConfirm),
 							React.createElement("ul", { className: "bh-capture-list" },
 								React.createElement("li", null, TEXT.captureWarnCa),
@@ -1641,7 +1653,9 @@ const FIRST_READ_RETRY_MS = 1200;
 								React.createElement("button", {
 									type: "button",
 									className: "bh-btn bh-btn-primary",
-									disabled: busyNow,
+									// Blocked rather than hidden: the user needs to see
+									// that the option exists and why it cannot run.
+									disabled: busyNow || (isObject(tunnel) && tunnel.tunnel === true),
 									onClick: () => { runCaptureNow(); }
 								}, authBusy === "capture" ? TEXT.captureRunning : TEXT.captureStart),
 								// While a session runs, closing the panel is not
