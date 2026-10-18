@@ -196,7 +196,7 @@ const FIRST_READ_RETRY_MS = 1200;
 			authScan: "扫描凭据",
 			authScanning: "扫描中…",
 			authStep3: "3. 写入号池",
-			authStep3Hint: "凭据可读时，通过 BuddyHub 的导入接口写入号池。",
+			authStep3Hint: "凭据可读时，通过 守护进程 的导入接口写入号池。",
 			authImport: "导入到号池",
 			authImporting: "导入中…",
 			authClose: "收起",
@@ -293,7 +293,7 @@ const FIRST_READ_RETRY_MS = 1200;
 			lines.push("## 请你");
 			lines.push("1. 先调用 `buddy_connect_pools` 查看两个区域号池的真实状态。");
 			lines.push("2. 如需判断某个凭据文件为何无法导入，调用 `buddy_connect_diagnose_import` 并传入该文件路径。");
-			lines.push("3. 如需查看守护进程日志，调用 `buddyhub_logs`。");
+			lines.push("3. 如需查看守护进程日志，调用 `daemon_logs`。");
 			lines.push("4. 给出原因与可执行的修复步骤；不要只复述上面的信息。");
 			return lines.join("\n");
 		}
@@ -551,10 +551,10 @@ const FIRST_READ_RETRY_MS = 1200;
 		 * @param props - the owner's `PluginConfigViewProps`.
 		 * @returns the card for the page view, otherwise nothing.
 		 */
-		function BuddyHubCard(props) {
+		function BuddyCard(props) {
 			const view = isObject(props) ? props.view : undefined;
 			if (view === "summary") return null;
-			return React.createElement(BuddyHubStatus);
+			return React.createElement(CheckinStatus);
 		}
 
 		/**
@@ -765,7 +765,7 @@ const FIRST_READ_RETRY_MS = 1200;
 		 * Every degraded shape the host contract allows is handled here without
 		 * throwing, because a throwing component blanks its whole slot entry.
 		 */
-		function BuddyHubStatus() {
+		function CheckinStatus() {
 			const [data, setData] = React.useState(null);
 			const [loading, setLoading] = React.useState(true);
 			const [transportError, setTransportError] = React.useState(null);
@@ -1065,7 +1065,7 @@ const FIRST_READ_RETRY_MS = 1200;
 				problem = { kind: "插件状态接口返回了错误。", detail: serverError };
 			} else if (status !== null && pools !== null && pools.ok === false) {
 				problem = {
-					kind: "BuddyHub 账号库无法读取，因此两个区域号池都不可用。",
+					kind: "守护进程 账号库无法读取，因此两个区域号池都不可用。",
 					detail: String(pools.reason === undefined ? "" : pools.reason)
 						+ (isText(pools.error) ? "：" + pools.error : "")
 				};
@@ -1073,7 +1073,7 @@ const FIRST_READ_RETRY_MS = 1200;
 				&& pools.pools.cn === 0 && pools.pools.ai === 0) {
 				problem = {
 					kind: "两个区域号池都没有可用账号，模型调用会失败。",
-					detail: "请在 BuddyHub 中导入账号；若导入后仍为空，用 buddy_connect_diagnose_import 检查凭据文件。"
+					detail: "请在 守护进程 中导入账号；若导入后仍为空，用 buddy_connect_diagnose_import 检查凭据文件。"
 				};
 			} else if (status !== null && checkin !== null && checkin.checkedIn !== true
 				&& isText(checkin.error)) {
@@ -1676,7 +1676,7 @@ const FIRST_READ_RETRY_MS = 1200;
 						)
 					),
 
-					// Step 3 — import through BuddyHub.
+					// Step 3 — import through 守护进程.
 					React.createElement("div", { className: "bh-step" },
 						React.createElement("span", { className: "bh-step-num" }, "3"),
 						React.createElement("div", { className: "bh-step-main" },
@@ -1717,7 +1717,7 @@ const FIRST_READ_RETRY_MS = 1200;
 			// also what makes the page show its configuration section at all.
 			ctx.slots.inject("plugins.bundle.config", () => ctx.slots.register(
 				{ name: "plugins.bundle.config", key: "dsh-command-buddy-connect" },
-				BuddyHubCard
+				BuddyCard
 			));
 		}
 

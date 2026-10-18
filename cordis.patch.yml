@@ -3,7 +3,7 @@
 #
 #   dsh-command-buddy-connect   served in-process from the account vault
 #                               (no daemon needed)
-#   buddyhub                    served by the local BuddyHub daemon when it is
+#   buddyhub                    served by the local 本地守护进程 when it is
 #                               running
 #
 # The provider ids inside the plugin ("buddy-connect", "buddyhub") are wire

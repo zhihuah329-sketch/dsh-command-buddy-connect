@@ -1,6 +1,6 @@
 /**
- * buddy-connect — WorkBuddy check-in, plus local BuddyHub region pools served
- * either by the BuddyHub daemon or entirely inside this process.
+ * buddy-connect — WorkBuddy check-in, plus local 守护进程 region pools served
+ * either by the 本地守护进程 or entirely inside this process.
  *
  * Opening DSH performs the day's WorkBuddy check-in, repeats it while DSH runs
  * so a session left open rolls into the new day, and reports the result on the
@@ -8,13 +8,13 @@
  *
  * ## Two model routes, on purpose
  *
- * - `buddyhub` (from `lib/adapter.js`) calls the BuddyHub daemon's
+ * - `buddyhub` (from `lib/adapter.js`) calls the local daemon's
  *   OpenAI-compatible proxy. That is the right route when the product is
  *   installed and running, because the daemon owns token refresh, rotation, and
  *   its own check-in scheduler.
  * - `buddy-connect` (from `lib/local-adapter.js`) needs no daemon: it reads the
  *   same encrypted account vault and applies the same routing rules in-process.
- *   This is what makes the pools usable when BuddyHub is not installed, and it
+ *   This is what makes the pools usable when 守护进程 is not installed, and it
  *   is where the reverse-proxy semantics live: region isolation,
  *   least-in-flight rotation, account-scoped conversation ids,
  *   rotate-only-on-retryable errors, and SSE normalisation.
@@ -22,17 +22,17 @@
  * Both can be enabled together: they are separate providers, so the model
  * picker shows which implementation served a call.
  *
- * ## Why the check-in does not go through BuddyHub
+ * ## Why the check-in does not go through 守护进程
  *
  * An earlier version delegated check-in to the daemon, which made the plugin do
- * nothing at all wherever BuddyHub was absent. Check-in now calls WorkBuddy's
+ * nothing at all wherever 守护进程 was absent. Check-in now calls WorkBuddy's
  * billing API directly, reusing the credential reader in `lib/workbuddy.js`.
  *
  * ## Shape
  *
  * - `lib/workbuddy.js` — credential access and the billing endpoints.
  * - `lib/scheduler.js` — when to check, and the status snapshot.
- * - `lib/vault.js` — read (never write) BuddyHub's encrypted account vault.
+ * - `lib/vault.js` — read (never write) the daemon's encrypted account vault.
  * - `lib/proxy.js` — the reverse-proxy rules, pure and unit-tested.
  * - `lib/local-adapter.js` — serves `buddy-connect` from the vault.
  * - `lib/adapter.js` + `lib/discovery.js` — the `buddyhub` daemon provider.
@@ -49,10 +49,10 @@ import { writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { BuddyHubAdapter, PROVIDER_ID, PROVIDER_NAME } from './lib/adapter.js'
+import { DaemonAdapter, PROVIDER_ID, PROVIDER_NAME } from './lib/adapter.js'
 import { LocalPoolAdapter, LOCAL_PROVIDER_ID, LOCAL_PROVIDER_NAME } from './lib/local-adapter.js'
 import { CheckinScheduler, nextOccurrence } from './lib/scheduler.js'
-import { buddyhubTools } from './lib/tools.js'
+import { daemonTools } from './lib/tools.js'
 import { poolTools } from './lib/pool-tools.js'
 import { accountOverview, authorizationPlan, discoverCredentials, importCredentialFile, importCredentials, resolveClientForSite, resolveWorkBuddyPath } from './lib/account-status.js'
 import { CaptureSession, describeCapture, runCapture } from './lib/capture.js'
@@ -105,10 +105,10 @@ export const Config = z.object({
     .description('Publish the buddy_* tools to the agent.'),
   enableProvider: z.boolean()
     .default(true)
-    .description('Register the local BuddyHub daemon as a model provider when it is installed.'),
+    .description('Register the local 本地守护进程 as a model provider when it is installed.'),
   enableLocalPool: z.boolean()
     .default(true)
-    .description('Serve the region pools from the account vault directly, without needing the BuddyHub daemon.'),
+    .description('Serve the region pools from the account vault directly, without needing the 本地守护进程.'),
   enableCommandCode: z.boolean()
     .default(true)
     .description('Offer Command Code as a provider. The API key is entered on the plugin page, not here.'),
@@ -116,7 +116,7 @@ export const Config = z.object({
     .default('https://api.commandcode.ai')
     .description('Command Code API base URL. Change only for a staging endpoint.'),
   dataDir: z.string()
-    .description('BuddyHub data directory. Leave unset to use BUDDYHUB_DATA, then %USERPROFILE%\\.buddyhub.'),
+    .description('守护进程数据目录. Leave unset to use BUDDYHUB_DATA, then %USERPROFILE%\\.buddyhub.'),
   workbuddyPath: z.string()
     .description('Path to the WorkBuddy desktop client, used by the "authorize account" button. Leave unset to use the vendor default, then a search of the usual install roots.'),
   authDirs: z.array(z.string())
@@ -124,12 +124,12 @@ export const Config = z.object({
     .description('Extra directories to scan for WorkBuddy credential files when authorizing an account.'),
   contextWindow: z.natural()
     .default(1_000_000)
-    .description('Context window advertised for the BuddyHub models.')
+    .description('Context window advertised for the 守护进程 models.')
 })
 
 /**
  * Register the check-in scheduler, its status route, the agent tools, and the
- * optional BuddyHub model provider.
+ * optional 守护进程 model provider.
  *
  * @param ctx - the plugin context.
  * @param config - the validated deployment configuration.
@@ -139,7 +139,7 @@ export function apply(ctx, config) {
     enabled: config.autoCheckin !== false,
     intervalMs: (config.intervalMinutes ?? 30) * 60 * 1000,
     logger: ctx.logger,
-    // Check-in prefers the CN account already imported into BuddyHub, which
+    // Check-in prefers the CN account already imported into 守护进程, which
     // needs no other plugin and no Electron binary.
     dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined
   })
@@ -161,10 +161,10 @@ export function apply(ctx, config) {
   if (attachments === undefined) {
     ctx.logger.info('dsh-command-buddy-connect: 没有 attachments 服务，图片输入将按文本处理')
   }
-  // The two clients BuddyHub recorded. Read once at mount: these are install
+  // The two clients 守护进程 recorded. Read once at mount: these are install
   // paths that do not change while DSH runs, and reading them per request would
   // mean touching the daemon's config on every page poll.
-  const buddyHubClients = readBuddyHubConfig()
+  const daemonClients = readDaemonConfig()
 
   // One capture at a time: a second session would install a second CA and could
   // leave one behind if the first is still unwinding.
@@ -292,7 +292,7 @@ export function apply(ctx, config) {
                 captureResult: result
               })
             }
-            // Persist into BuddyHub through its own import route so the new
+            // Persist into 守护进程 through its own import route so the new
             // account appears in the same pool the page shows.
             const written = await writeCapturedCredential(result, config)
             return send(200, {
@@ -403,7 +403,7 @@ export function apply(ctx, config) {
             })
             return send(200, { ...scheduler.snapshot(), commandCodeTest: verdict })
           } else if (body?.action === 'import') {
-            // Delegated to BuddyHub's own route: it owns and caches the vault,
+            // Delegated to the daemon's own route: it owns and caches the vault,
             // so an outside write would be overwritten on its next save.
             const result = await importCredentials({
               authDirs: config.authDirs,
@@ -431,8 +431,8 @@ export function apply(ctx, config) {
             ...resolveWorkBuddyPath(config.workbuddyPath),
             // Per-region client resolution, so each region's authorize button
             // can say which client it will open before it is pressed.
-            cn: resolveClientForSite({ site: 'cn', configured: config.workbuddyPath, ...buddyHubClients }),
-            ai: resolveClientForSite({ site: 'ai', configured: config.workbuddyPath, ...buddyHubClients })
+            cn: resolveClientForSite({ site: 'cn', configured: config.workbuddyPath, ...daemonClients }),
+            ai: resolveClientForSite({ site: 'ai', configured: config.workbuddyPath, ...daemonClients })
           },
           // The page owns the key field, so it needs to know whether one is
           // stored without ever receiving it. Read from disk on every request:
@@ -469,7 +469,7 @@ export function apply(ctx, config) {
     // tools describe separate products and separate state.
     const definitions = [
       ...checkinTools(scheduler, config),
-      ...buddyhubTools({ dataDir, logger: ctx.logger }),
+      ...daemonTools({ dataDir, logger: ctx.logger }),
       ...poolTools({ dataDir, logger: ctx.logger })
     ]
     for (const tool of definitions) {
@@ -478,7 +478,7 @@ export function apply(ctx, config) {
   }
 
   if (config.enableProvider !== false) {
-    const adapter = new BuddyHubAdapter({
+    const adapter = new DaemonAdapter({
       dataDir,
       contextWindow: config.contextWindow,
       logger: ctx.logger,
@@ -537,7 +537,7 @@ function routeStates(config, state) {
       region: null,
       enabled: on(PROVIDER_ID, config.enableProvider !== false),
       active: on(PROVIDER_ID, config.enableProvider !== false),
-      detail: '调用本机 BuddyHub 守护进程（未运行时调用失败）'
+      detail: '调用本机 本地守护进程（未运行时调用失败）'
     },
     {
       id: CC_PROVIDER_ID,
@@ -556,12 +556,12 @@ function routeStates(config, state) {
 }
 
 function openWorkBuddyForSite(site, configured) {
-  const read = readBuddyHubConfig()
+  const read = readDaemonConfig()
   const resolved = resolveClientForSite({
     site,
     configured,
-    buddyhubPath: read.workbuddyExe,
-    buddyhubIntlPath: read.workbuddyIntlExe
+    daemonPath: read.workbuddyExe,
+    daemonIntlPath: read.workbuddyIntlExe
   })
   const name = site === 'ai' ? '国际版 WorkBuddy' : '国内版 WorkBuddy'
   if (resolved.path === undefined) {
@@ -592,8 +592,8 @@ function openWorkBuddyForSite(site, configured) {
   }
 }
 
-/** Read the two client paths BuddyHub recorded, ignoring an unreadable config. */
-function readBuddyHubConfig() {
+/** Read the two client paths 守护进程 recorded, ignoring an unreadable config. */
+function readDaemonConfig() {
   try {
     const config = readConfig(resolveDataDir(undefined)).config
     return {
@@ -606,7 +606,7 @@ function readBuddyHubConfig() {
 }
 
 /**
- * Persist a captured credential into BuddyHub's pool.
+ * Persist a captured credential into the daemon's pool.
  *
  * The capture yields a raw bearer token, which is what the proxy needs but not
  * what the import route reads — that route expects a credential *file* in the
@@ -736,7 +736,7 @@ function checkinTools(scheduler, config) {
   }]
 
   const status = defineTool({
-    name: 'buddyhub_checkin_status',
+    name: 'checkin_status',
     description: 'Report the WorkBuddy account and whether today\'s check-in reward has been claimed, including the current credit balance. Read-only.',
     parameters: {},
     output: {
@@ -789,7 +789,7 @@ function checkinTools(scheduler, config) {
   })
 
   const runNow = defineTool({
-    name: 'buddyhub_checkin',
+    name: 'checkin_now',
     description: 'Run the WorkBuddy daily check-in now instead of waiting for the scheduled time. Claims the reward only if the server reports today as unclaimed, so it is safe to call repeatedly.',
     parameters: {},
     output: {
@@ -830,7 +830,7 @@ function checkinTools(scheduler, config) {
   })
 
   const schedule = defineTool({
-    name: 'buddyhub_schedule',
+    name: 'checkin_schedule',
     description: 'Report the WorkBuddy check-in schedule: whether automatic check-in is enabled, how often it runs, and when the next scheduled check is due. Read-only.',
     parameters: {},
     output: {
@@ -858,7 +858,7 @@ function checkinTools(scheduler, config) {
         ...(next === null ? {} : { nextCheckinAt: next }),
         summary: enabled
           ? `Automatic check-in is on: every ${interval} minutes, next due ${next ?? 'unknown'}.`
-          : 'Automatic check-in is disabled; use buddyhub_checkin to run it manually.'
+          : 'Automatic check-in is disabled; use checkin_now to run it manually.'
       })
     },
     presentCall: () => ({ card: 'generic', title: 'Read WorkBuddy check-in schedule', kind: 'other' })

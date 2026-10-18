@@ -1,5 +1,5 @@
 /**
- * Unit tests for the BuddyHub-compatible proxy rules.
+ * Unit tests for the 守护进程-compatible proxy rules.
  *
  * Run with: node --test test/
  *

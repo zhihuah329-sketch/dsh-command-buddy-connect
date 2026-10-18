@@ -22,11 +22,11 @@
 - **宁可不做，不做错**：找不到国际版客户端就报「未安装」，而不是打开国内版客户端
 - **清理必须可靠**：装过的证书、改过的代理，任何退出路径都要还原
 
-## 与 BuddyHub 的关系
+## 与 守护进程 的关系
 
-插件读取 `~/.buddyhub` 下的加密账号库和守护进程配置，因此**已装 BuddyHub 的机器可以直接复用已有账号**，无需重新导入。
+插件读取 `~/.buddyhub` 下的加密账号库和守护进程配置，因此**已装守护进程的机器可以直接复用已有账号**，无需重新导入。
 
-不装 BuddyHub 也能用：账号库读不到时插件会明确提示，账号也可以通过本插件自己的页面添加和管理。
+不装 守护进程 也能用：账号库读不到时插件会明确提示，账号也可以通过本插件自己的页面添加和管理。
 
 
 ---
@@ -43,7 +43,7 @@
 
 ### 2. 自动签到
 
-DSH 启动后自动完成 WorkBuddy 当日签到，结果同步显示在 `buddyhub_*` 工具中。
+DSH 启动后自动完成 WorkBuddy 当日签到，结果同步显示在 `daemon_*` 工具中。
 
 ### 3. 分区域授权
 
@@ -100,9 +100,9 @@ npm pack
 ### 依赖
 
 - DeepSeek Harness `0.2.1-rc.2`
-- 可选：[BuddyHub](https://github.com/OHCJ099/BuddyHub)（提供加密账号库与守护进程）
+- 可选：[守护进程](https://github.com/OHCJ099/守护进程)（提供加密账号库与守护进程）
 
-没有 BuddyHub 时，插件会尝试直接读取账号库；读取不到会明确提示，而不是静默失败。
+没有 守护进程 时，插件会尝试直接读取账号库；读取不到会明确提示，而不是静默失败。
 
 ---
 
@@ -115,7 +115,7 @@ dsh-command-buddy-connect:
   autoCheckin: true       # 启动时自动签到
   checkinTime: "09:00"    # 定时签到时间
   enableLocalPool: true   # 启用国内版 / 国际版号池
-  enableProvider: true    # 启用 BuddyHub 守护进程线路
+  enableProvider: true    # 启用 本地守护进程线路
   enableCommandCode: true # 启用 Command Code 线路
   commandCodeApiBase: "https://api.commandcode.ai"
   dataDir: null           # 账号库目录，默认 ~/.buddyhub
@@ -131,10 +131,10 @@ dsh-command-buddy-connect:
 
 | 工具 | 作用 |
 |---|---|
-| `buddyhub_status` | 查询签到状态与账号池健康 |
-| `buddyhub_checkin` | 立即执行签到 |
-| `buddyhub_accounts` | 列出各区域账号及状态 |
-| `buddyhub_import` | 从本机凭据文件导入账号 |
+| `daemon_status` | 查询签到状态与账号池健康 |
+| `daemon_checkin` | 立即执行签到 |
+| `daemon_accounts` | 列出各区域账号及状态 |
+| `daemon_import` | 从本机凭据文件导入账号 |
 
 ---
 
@@ -142,7 +142,7 @@ dsh-command-buddy-connect:
 
 | 路径 | 内容 | 权限 |
 |---|---|---|
-| `~/.buddyhub/accounts.enc` | BuddyHub 加密账号库（只读） | — |
+| `~/.buddyhub/accounts.enc` | 加密账号库（只读读取） | — |
 | `~/.dsh-command-buddy-connect/command-code.json` | Command Code API Key | 0600 |
 | `~/.dsh-command-buddy-connect/routes.json` | 区域开关状态 | — |
 | `~/.dsh-command-buddy-connect/capture/` | 抓包用临时证书（1 天有效） | 0600 |
@@ -164,14 +164,14 @@ client.js           # 页面侧：三分区 UI
 lib/
   proxy.js          # 反代规则（轮询、会话亲和、错误映射）
   local-adapter.js  # 进程内号池适配器
-  adapter.js        # BuddyHub 守护进程适配器
+  adapter.js        # 本地守护进程适配器
   cc-adapter.js     # Command Code 适配器
   command-code.js   # CC 协议转换（纯函数）
   image-wire.js     # 图片块 → image_url
   account-status.js # 账号状态推导、凭据发现、导入
   capture.js        # 凭据抓取会话
   cert-gen.js       # 运行时证书生成（纯 JS DER 编码）
-  vault.js          # BuddyHub 账号库解密
+  vault.js          # 守护进程 账号库解密
 ```
 
 ### 设计原则
