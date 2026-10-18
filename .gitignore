@@ -1,0 +1,28 @@
+# Build output
+dist/
+*.tgz
+
+# Dependencies
+node_modules/
+
+# Test scratch
+.test-scratch/
+
+# Generated capture certificates — never commit a CA private key
+assets/capture/ca.crt
+assets/capture/ca.key
+assets/capture/leaf.crt
+assets/capture/leaf.key
+*.pem
+*.key
+
+# Internal delivery notes (not for publication)
+DELIVERY.md
+
+# Local state
+*.log
+captures.jsonl
+
+# OS
+Thumbs.db
+.DS_Store

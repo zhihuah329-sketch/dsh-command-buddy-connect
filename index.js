@@ -1,0 +1,868 @@
+/**
+ * buddy-connect — WorkBuddy check-in, plus local BuddyHub region pools served
+ * either by the BuddyHub daemon or entirely inside this process.
+ *
+ * Opening DSH performs the day's WorkBuddy check-in, repeats it while DSH runs
+ * so a session left open rolls into the new day, and reports the result on the
+ * plugin's own page in the Web GUI.
+ *
+ * ## Two model routes, on purpose
+ *
+ * - `buddyhub` (from `lib/adapter.js`) calls the BuddyHub daemon's
+ *   OpenAI-compatible proxy. That is the right route when the product is
+ *   installed and running, because the daemon owns token refresh, rotation, and
+ *   its own check-in scheduler.
+ * - `buddy-connect` (from `lib/local-adapter.js`) needs no daemon: it reads the
+ *   same encrypted account vault and applies the same routing rules in-process.
+ *   This is what makes the pools usable when BuddyHub is not installed, and it
+ *   is where the reverse-proxy semantics live: region isolation,
+ *   least-in-flight rotation, account-scoped conversation ids,
+ *   rotate-only-on-retryable errors, and SSE normalisation.
+ *
+ * Both can be enabled together: they are separate providers, so the model
+ * picker shows which implementation served a call.
+ *
+ * ## Why the check-in does not go through BuddyHub
+ *
+ * An earlier version delegated check-in to the daemon, which made the plugin do
+ * nothing at all wherever BuddyHub was absent. Check-in now calls WorkBuddy's
+ * billing API directly, reusing the credential reader in `lib/workbuddy.js`.
+ *
+ * ## Shape
+ *
+ * - `lib/workbuddy.js` — credential access and the billing endpoints.
+ * - `lib/scheduler.js` — when to check, and the status snapshot.
+ * - `lib/vault.js` — read (never write) BuddyHub's encrypted account vault.
+ * - `lib/proxy.js` — the reverse-proxy rules, pure and unit-tested.
+ * - `lib/local-adapter.js` — serves `buddy-connect` from the vault.
+ * - `lib/adapter.js` + `lib/discovery.js` — the `buddyhub` daemon provider.
+ * - `lib/pool-tools.js` — pool health and import diagnostics.
+ * - `client.js` — the status card rendered on the plugin page.
+ *
+ * @module buddy-connect
+ */
+
+import z from '@deepseek-ai/schemastery'
+import { defineTool } from '@deepseek-ai/dsh-tools'
+import { spawn } from 'node:child_process'
+import { writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { BuddyHubAdapter, PROVIDER_ID, PROVIDER_NAME } from './lib/adapter.js'
+import { LocalPoolAdapter, LOCAL_PROVIDER_ID, LOCAL_PROVIDER_NAME } from './lib/local-adapter.js'
+import { CheckinScheduler, nextOccurrence } from './lib/scheduler.js'
+import { buddyhubTools } from './lib/tools.js'
+import { poolTools } from './lib/pool-tools.js'
+import { accountOverview, authorizationPlan, discoverCredentials, importCredentialFile, importCredentials, resolveClientForSite, resolveWorkBuddyPath } from './lib/account-status.js'
+import { CaptureSession, describeCapture, runCapture } from './lib/capture.js'
+import { CommandCodeAdapter, CC_PROVIDER_ID, CC_PROVIDER_NAME } from './lib/cc-adapter.js'
+import { RouteSwitches } from './lib/router-state.js'
+import { readConfig, resolveDataDir } from './lib/discovery.js'
+import {
+  maskKey,
+  readCommandCodeKey,
+  testCommandCodeKey,
+  validateKeyShape,
+  writeCommandCodeKey
+} from './lib/cc-credentials.js'
+
+/** The installed plugin directory, used to find the capture assets. */
+const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url))
+
+/** Cordis plugin name. */
+export const name = 'dsh-command-buddy-connect'
+
+/**
+ * Services this plugin needs. `webServer` carries the status route the UI
+ * reads; `tools` publishes state to the agent; `timer` drives the recurring
+ * check; `llm` registers the model providers.
+ *
+ * `attachments` is deliberately *not* listed: it is only needed to turn an
+ * image reference into request bytes, and requiring it would make the whole
+ * plugin unloadable in a composition that lacks it. It is fetched optionally at
+ * mount, and its absence degrades image input to text rather than taking the
+ * panel down with it.
+ */
+export const inject = ['webServer', 'tools', 'timer', 'llm']
+
+/** Path the status card and the tools read. */
+const STATUS_PATH = '/api/dsh-command-buddy-connect/status'
+
+/** Plugin configuration. */
+export const Config = z.object({
+  autoCheckin: z.boolean()
+    .default(true)
+    .description('Perform the WorkBuddy check-in automatically while DSH runs.'),
+  checkinTime: z.string()
+    .default('09:00')
+    .description('CN-time HH:mm boundary reported as the next scheduled check-in.'),
+  intervalMinutes: z.natural()
+    .default(30)
+    .description('Minutes between automatic checks while DSH is running.'),
+  enableTools: z.boolean()
+    .default(true)
+    .description('Publish the buddy_* tools to the agent.'),
+  enableProvider: z.boolean()
+    .default(true)
+    .description('Register the local BuddyHub daemon as a model provider when it is installed.'),
+  enableLocalPool: z.boolean()
+    .default(true)
+    .description('Serve the region pools from the account vault directly, without needing the BuddyHub daemon.'),
+  enableCommandCode: z.boolean()
+    .default(true)
+    .description('Offer Command Code as a provider. The API key is entered on the plugin page, not here.'),
+  commandCodeApiBase: z.string()
+    .default('https://api.commandcode.ai')
+    .description('Command Code API base URL. Change only for a staging endpoint.'),
+  dataDir: z.string()
+    .description('BuddyHub data directory. Leave unset to use BUDDYHUB_DATA, then %USERPROFILE%\\.buddyhub.'),
+  workbuddyPath: z.string()
+    .description('Path to the WorkBuddy desktop client, used by the "authorize account" button. Leave unset to use the vendor default, then a search of the usual install roots.'),
+  authDirs: z.array(z.string())
+    .default([])
+    .description('Extra directories to scan for WorkBuddy credential files when authorizing an account.'),
+  contextWindow: z.natural()
+    .default(1_000_000)
+    .description('Context window advertised for the BuddyHub models.')
+})
+
+/**
+ * Register the check-in scheduler, its status route, the agent tools, and the
+ * optional BuddyHub model provider.
+ *
+ * @param ctx - the plugin context.
+ * @param config - the validated deployment configuration.
+ */
+export function apply(ctx, config) {
+  const scheduler = new CheckinScheduler({
+    enabled: config.autoCheckin !== false,
+    intervalMs: (config.intervalMinutes ?? 30) * 60 * 1000,
+    logger: ctx.logger,
+    // Check-in prefers the CN account already imported into BuddyHub, which
+    // needs no other plugin and no Electron binary.
+    dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined
+  })
+
+  ctx.effect(
+    () => scheduler.start({
+      // `timeout` fires once; `interval` repeats. The recurring check must use
+      // `interval`, or a long-running session would never roll into the next day.
+      once: (fn, ms) => ctx.timer.timeout(fn, ms),
+      every: (fn, ms) => ctx.timer.interval(fn, ms)
+    }),
+    'dsh-command-buddy-connect: check-in schedule'
+  )
+
+  const dataDir = config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined
+
+  // Optional: without it, images degrade to text instead of failing the call.
+  const attachments = ctx.get('attachments')
+  if (attachments === undefined) {
+    ctx.logger.info('dsh-command-buddy-connect: 没有 attachments 服务，图片输入将按文本处理')
+  }
+  // The two clients BuddyHub recorded. Read once at mount: these are install
+  // paths that do not change while DSH runs, and reading them per request would
+  // mean touching the daemon's config on every page poll.
+  const buddyHubClients = readBuddyHubConfig()
+
+  // One capture at a time: a second session would install a second CA and could
+  // leave one behind if the first is still unwinding.
+  const captureSession = new CaptureSession()
+
+  // The switches decide whether a route answers calls, and they are consulted
+  // per call rather than at mount time. Unregistering an `llm` adapter would
+  // require remounting the plugin, so a switch that works instantly has to be
+  // enforced at dispatch instead.
+  //
+  // CN and AI have one switch each: the pools never share accounts, so a single
+  // provider-level switch would make turning off one region disable the other.
+  const switches = new RouteSwitches({
+    cn: config.enableLocalPool !== false,
+    ai: config.enableLocalPool !== false,
+    [PROVIDER_ID]: config.enableProvider !== false,
+    [CC_PROVIDER_ID]: config.enableCommandCode !== false
+  }, ctx.logger)
+
+  // The local pool is constructed before the status route so that route can
+  // report its state alongside the check-in result.
+  let localPool
+  if (config.enableLocalPool !== false) {
+    localPool = new LocalPoolAdapter({
+      dataDir,
+      contextWindow: config.contextWindow,
+      logger: ctx.logger,
+      // Takes the region, because one adapter serves both pools.
+      isEnabled: (site) => switches.get(site === 'ai' ? 'ai' : 'cn'),
+      attachments
+    })
+    ctx.effect(
+      () => ctx.llm.registerAdapter([LOCAL_PROVIDER_ID], localPool),
+      'dsh-command-buddy-connect: local pool provider registration'
+    )
+    ctx.logger.info(`dsh-command-buddy-connect: registered provider "${LOCAL_PROVIDER_ID}" (${LOCAL_PROVIDER_NAME})`)
+  }
+
+  // Command Code's key belongs to the user, not to the deployment: it is read
+  // from this plugin's own state directory, where the page writes it. Plugin
+  // config only supplies an endpoint override, so no install ships a key.
+  const ccApiKey = readCommandCodeKey()
+  let commandCode
+  if (ccApiKey !== undefined) {
+    commandCode = new CommandCodeAdapter({
+      apiKey: ccApiKey,
+      apiBase: config.commandCodeApiBase,
+      contextWindow: config.contextWindow,
+      logger: ctx.logger,
+      isEnabled: () => switches.get(CC_PROVIDER_ID)
+    })
+    ctx.effect(
+      () => ctx.llm.registerAdapter([CC_PROVIDER_ID], commandCode),
+      'dsh-command-buddy-connect: command code provider registration'
+    )
+    ctx.logger.info(`dsh-command-buddy-connect: registered provider "${CC_PROVIDER_ID}" (${CC_PROVIDER_NAME})`)
+  } else {
+    ctx.logger.info('dsh-command-buddy-connect: Command Code 未配置 API Key，请在插件页面填写后自动接入')
+  }
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: STATUS_PATH,
+    handler: async (req, res) => {
+      const send = (status, payload) => {
+        res.writeHead(status, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store'
+        })
+        res.end(JSON.stringify(payload))
+      }
+      try {
+        if (req.method === 'POST') {
+          const body = await readJsonBody(req)
+          if (body?.action === 'checkin') await scheduler.run({ force: true })
+          else if (body?.action === 'refresh') await scheduler.run()
+          else if (body?.action === 'authorize') {
+            // Authorization is per region: the two clients are separate
+            // installs, and opening the CN client to authorize an AI account
+            // would show the wrong sign-in screen.
+            const site = body?.site === 'ai' ? 'ai' : 'cn'
+            const opened = openWorkBuddyForSite(site, config.workbuddyPath)
+            return send(opened.ok ? 200 : 400, {
+              ...scheduler.snapshot(),
+              ...(localPool === undefined ? {} : { pools: localPool.poolStatus() }),
+              authorize: opened
+            })
+          } else if (body?.action === 'capture-describe') {
+            // Consent comes first: the page must be able to state exactly what
+            // a capture installs and intercepts before the user agrees to it.
+            return send(200, { ...scheduler.snapshot(), capture: describeCapture() })
+          } else if (body?.action === 'capture-start') {
+            // Non-blocking on purpose. A capture waits for the user to restart
+            // the client and sign in, which can take minutes; holding one HTTP
+            // request open for that gave the page no way to show progress or
+            // offer cancel. The session runs in the background instead.
+            const state = await captureSession.start({
+              pluginDir: PLUGIN_DIR,
+              onProgress: (p) => ctx.logger.info(`dsh-command-buddy-connect: ${p.message ?? p.stage}`),
+              onCaptured: (result) => writeCapturedCredential(result, config)
+            })
+            return send(200, {
+              ...scheduler.snapshot(),
+              ...(localPool === undefined ? {} : { pools: localPool.poolStatus() }),
+              captureState: state
+            })
+          } else if (body?.action === 'capture-cancel') {
+            const state = captureSession.cancel()
+            return send(200, {
+              ...scheduler.snapshot(),
+              ...(localPool === undefined ? {} : { pools: localPool.poolStatus() }),
+              captureState: state
+            })
+          } else if (body?.action === 'capture') {
+            // Kept for compatibility: run one capture to completion. The UI no
+            // longer uses it, but a script that calls it still works.
+            const result = await runCapture({
+              pluginDir: PLUGIN_DIR,
+              onProgress: (p) => ctx.logger.info(`dsh-command-buddy-connect: ${p.message ?? p.stage}`)
+            })
+            if (result.ok !== true) {
+              return send(200, {
+                ...scheduler.snapshot(),
+                ...(localPool === undefined ? {} : { pools: localPool.poolStatus() }),
+                captureResult: result
+              })
+            }
+            // Persist into BuddyHub through its own import route so the new
+            // account appears in the same pool the page shows.
+            const written = await writeCapturedCredential(result, config)
+            return send(200, {
+              ...scheduler.snapshot(),
+              ...(localPool === undefined ? {} : { pools: localPool.poolStatus() }),
+              accounts: accountOverview({
+                dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined
+              }),
+              captureResult: { ...result, token: undefined, written }
+            })
+          } else if (body?.action === 'discover') {
+            const discovery = discoverCredentials({
+              authDirs: config.authDirs,
+              dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined
+            })
+            return send(200, {
+              ...scheduler.snapshot(),
+              ...(localPool === undefined ? {} : { pools: localPool.poolStatus() }),
+              discovery: {
+                ...discovery,
+                plan: authorizationPlan(discovery)
+              }
+            })
+          } else if (body?.action === 'toggle') {
+            // Live switch: the adapters read it per call, so no remount and no
+            // restart is needed. The value is persisted so it survives one.
+            const id = String(body.route ?? '')
+            const value = body.enabled === true
+            try {
+              await switches.set(id, value)
+            } catch (error) {
+              return send(500, {
+                ...scheduler.snapshot(),
+                error: `无法保存线路开关：${error instanceof Error ? error.message : String(error)}`
+              })
+            }
+            return send(200, {
+              ...scheduler.snapshot(),
+              ...(localPool === undefined ? {} : { pools: localPool.poolStatus() }),
+              accounts: accountOverview({
+                dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined
+              }),
+              workbuddy: resolveWorkBuddyPath(config.workbuddyPath),
+              routes: routeStates(config, {
+                localPool,
+                switches,
+                commandCodeRegistered: commandCode !== undefined
+              })
+            })
+          } else if (body?.action === 'cc-key') {
+            // Save (or clear) the user's Command Code key. The response never
+            // echoes the key: the page only ever sees a masked form.
+            const submitted = typeof body.apiKey === 'string' ? body.apiKey : ''
+            if (body.clear === true || submitted.trim().length === 0) {
+              writeCommandCodeKey('')
+              return send(200, {
+                ...scheduler.snapshot(),
+                ...(localPool === undefined ? {} : { pools: localPool.poolStatus() }),
+                commandCode: { configured: false, cleared: true, message: '已清除 API Key。' }
+              })
+            }
+            const shapeError = validateKeyShape(submitted)
+            if (shapeError !== null) {
+              return send(400, {
+                ...scheduler.snapshot(),
+                error: shapeError,
+                commandCode: { configured: readCommandCodeKey() !== undefined, message: shapeError }
+              })
+            }
+            try {
+              writeCommandCodeKey(submitted)
+            } catch (error) {
+              return send(500, {
+                ...scheduler.snapshot(),
+                error: `无法保存 API Key：${error instanceof Error ? error.message : String(error)}`
+              })
+            }
+            // The adapter is created at mount, so a newly saved key takes
+            // effect on the next DSH start. Say so rather than implying it is
+            // already serving.
+            return send(200, {
+              ...scheduler.snapshot(),
+              ...(localPool === undefined ? {} : { pools: localPool.poolStatus() }),
+              commandCode: {
+                configured: true,
+                key: maskKey(submitted),
+                restartRequired: commandCode === undefined,
+                message: commandCode === undefined
+                  ? '已保存。重启 DSH 后该线路才会出现在模型列表里。'
+                  : '已保存。'
+              }
+            })
+          } else if (body?.action === 'cc-test') {
+            // Connectivity only: it requests the model catalogue, never a
+            // completion, so testing a key costs no credit.
+            const candidate = typeof body.apiKey === 'string' && body.apiKey.trim().length > 0
+              ? body.apiKey
+              : readCommandCodeKey()
+            if (candidate === undefined) {
+              return send(200, {
+                ...scheduler.snapshot(),
+                commandCodeTest: { ok: false, reason: 'missing', message: '还没有填写 API Key。' }
+              })
+            }
+            const verdict = await testCommandCodeKey({
+              apiKey: candidate,
+              apiBase: config.commandCodeApiBase
+            })
+            return send(200, { ...scheduler.snapshot(), commandCodeTest: verdict })
+          } else if (body?.action === 'import') {
+            // Delegated to BuddyHub's own route: it owns and caches the vault,
+            // so an outside write would be overwritten on its next save.
+            const result = await importCredentials({
+              authDirs: config.authDirs,
+              dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined
+            })
+            return send(200, {
+              ...scheduler.snapshot(),
+              ...(localPool === undefined ? {} : { pools: localPool.poolStatus() }),
+              importResult: result,
+              accounts: accountOverview({
+                dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined
+              })
+            })
+          }
+        }
+        send(200, {
+          ...scheduler.snapshot(),
+          nextCheckinAt: config.autoCheckin === false ? null : describeNext(config.checkinTime),
+          ...(localPool === undefined ? {} : { pools: localPool.poolStatus() }),
+          // Derived status is the authority the page and the tools both read.
+          accounts: accountOverview({
+            dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined
+          }),
+          workbuddy: {
+            ...resolveWorkBuddyPath(config.workbuddyPath),
+            // Per-region client resolution, so each region's authorize button
+            // can say which client it will open before it is pressed.
+            cn: resolveClientForSite({ site: 'cn', configured: config.workbuddyPath, ...buddyHubClients }),
+            ai: resolveClientForSite({ site: 'ai', configured: config.workbuddyPath, ...buddyHubClients })
+          },
+          // The page owns the key field, so it needs to know whether one is
+          // stored without ever receiving it. Read from disk on every request:
+          // the mount-time value would be stale the moment the key changes.
+          commandCode: (() => {
+            const current = readCommandCodeKey()
+            return {
+              configured: current !== undefined,
+              ...(current === undefined ? {} : { key: maskKey(current) }),
+              apiBase: config.commandCodeApiBase,
+              registered: commandCode !== undefined
+            }
+          })(),
+          // The page polls this while a capture runs, so "waiting for you" is
+          // distinguishable from a hung request. The token is never included.
+          captureState: captureSession.snapshot(),
+          routes: routeStates(config, {
+            localPool,
+            switches,
+            commandCodeRegistered: commandCode !== undefined
+          })
+        })
+      } catch (error) {
+        send(500, {
+          ...scheduler.snapshot(),
+          error: error instanceof Error ? error.message : String(error)
+        })
+      }
+    }
+  }), 'dsh-command-buddy-connect: status route')
+
+  if (config.enableTools !== false) {
+    // Check-in tools read the scheduler's own snapshot; the daemon and pool
+    // tools describe separate products and separate state.
+    const definitions = [
+      ...checkinTools(scheduler, config),
+      ...buddyhubTools({ dataDir, logger: ctx.logger }),
+      ...poolTools({ dataDir, logger: ctx.logger })
+    ]
+    for (const tool of definitions) {
+      ctx.effect(() => ctx.tools.register(tool), `dsh-command-buddy-connect: tool ${tool.name}`)
+    }
+  }
+
+  if (config.enableProvider !== false) {
+    const adapter = new BuddyHubAdapter({
+      dataDir,
+      contextWindow: config.contextWindow,
+      logger: ctx.logger,
+      attachments
+    })
+    ctx.effect(
+      () => ctx.llm.registerAdapter([PROVIDER_ID], adapter),
+      'dsh-command-buddy-connect: daemon provider registration'
+    )
+    ctx.logger.info(`dsh-command-buddy-connect: registered provider "${PROVIDER_ID}" (${PROVIDER_NAME})`)
+  }
+
+  ctx.logger.info(
+    `dsh-command-buddy-connect: WorkBuddy check-in ${config.autoCheckin === false ? 'disabled' : 'enabled'}; `
+    + `local pool ${localPool === undefined ? 'disabled' : 'enabled'}; status at ${STATUS_PATH}`
+  )
+}
+
+/**
+ * Report every model route and whether it is actually serving.
+ *
+ * `enabled` is the user's switch; `active` is whether it produced a usable
+ * registration. They differ for a real reason — a route can be switched on but
+ * have no credential — and the page must be able to say which of those it is,
+ * or "on but broken" looks identical to "off".
+ *
+ * @param config - the plugin configuration.
+ * @param state - the adapters that were actually constructed.
+ * @returns one row per route.
+ */
+function routeStates(config, state) {
+  const on = (id, fallback) => (state.switches === undefined ? fallback : state.switches.get(id))
+  const ccConfigured = readCommandCodeKey() !== undefined
+  const localReady = state.localPool !== undefined
+  return [
+    {
+      id: 'cn',
+      name: LOCAL_PROVIDER_NAME,
+      region: 'cn',
+      // Per-region, not per-provider: one adapter serves both pools.
+      enabled: on('cn', config.enableLocalPool !== false),
+      active: localReady && on('cn', config.enableLocalPool !== false),
+      detail: localReady ? '中国版账号池 · 签到与调用' : '未注册'
+    },
+    {
+      id: 'ai',
+      name: LOCAL_PROVIDER_NAME,
+      region: 'ai',
+      enabled: on('ai', config.enableLocalPool !== false),
+      active: localReady && on('ai', config.enableLocalPool !== false),
+      detail: localReady ? '国际版账号池 · 仅调用' : '未注册'
+    },
+    {
+      id: PROVIDER_ID,
+      name: PROVIDER_NAME,
+      region: null,
+      enabled: on(PROVIDER_ID, config.enableProvider !== false),
+      active: on(PROVIDER_ID, config.enableProvider !== false),
+      detail: '调用本机 BuddyHub 守护进程（未运行时调用失败）'
+    },
+    {
+      id: CC_PROVIDER_ID,
+      name: CC_PROVIDER_NAME,
+      region: null,
+      enabled: on(CC_PROVIDER_ID, config.enableCommandCode !== false),
+      active: state.commandCodeRegistered === true,
+      // The distinction the page must show: switched on but no key is a
+      // different fix from switched off.
+      needsKey: !ccConfigured,
+      detail: ccConfigured
+        ? 'Command Code 直接对接'
+        : '还没有填写 API Key，请在本页填写'
+    }
+  ]
+}
+
+function openWorkBuddyForSite(site, configured) {
+  const read = readBuddyHubConfig()
+  const resolved = resolveClientForSite({
+    site,
+    configured,
+    buddyhubPath: read.workbuddyExe,
+    buddyhubIntlPath: read.workbuddyIntlExe
+  })
+  const name = site === 'ai' ? '国际版 WorkBuddy' : '国内版 WorkBuddy'
+  if (resolved.path === undefined) {
+    return {
+      ok: false,
+      site,
+      source: resolved.source,
+      error: `找不到${name}客户端。请先在对应版本登录，或在插件配置里填写 workbuddyPath。`
+    }
+  }
+  try {
+    const child = spawn(resolved.path, [], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: false
+    })
+    child.unref()
+    return { ok: true, site, path: resolved.path, source: resolved.source, name }
+  } catch (error) {
+    return {
+      ok: false,
+      site,
+      path: resolved.path,
+      source: resolved.source,
+      name,
+      error: `无法启动${name}：${error instanceof Error ? error.message : String(error)}`
+    }
+  }
+}
+
+/** Read the two client paths BuddyHub recorded, ignoring an unreadable config. */
+function readBuddyHubConfig() {
+  try {
+    const config = readConfig(resolveDataDir(undefined)).config
+    return {
+      workbuddyExe: typeof config.workbuddyExe === 'string' ? config.workbuddyExe : undefined,
+      workbuddyIntlExe: typeof config.workbuddyIntlExe === 'string' ? config.workbuddyIntlExe : undefined
+    }
+  } catch {
+    return { workbuddyExe: undefined, workbuddyIntlExe: undefined }
+  }
+}
+
+/**
+ * Persist a captured credential into BuddyHub's pool.
+ *
+ * The capture yields a raw bearer token, which is what the proxy needs but not
+ * what the import route reads — that route expects a credential *file* in the
+ * client's own JSON shape. So the token is written to a temporary file in that
+ * shape, imported, and the file removed immediately: leaving a plaintext token
+ * on disk would defeat the point of capturing it in memory.
+ *
+ * @param capture - the `runCapture` result.
+ * @param config - the plugin configuration.
+ * @returns what the daemon reported, or why nothing was written.
+ */
+async function writeCapturedCredential(capture, config) {
+  const temp = join(tmpdir(), `buddy-connect-captured-${Date.now()}.info`)
+  try {
+    // `auth.domain` decides the region, so it must be the captured domain.
+    const record = {
+      account: { uid: capture.uid ?? '' },
+      auth: {
+        accessToken: capture.token,
+        domain: capture.domain ?? 'copilot.tencent.com',
+        expiresAt: Date.now() + 28 * 24 * 60 * 60 * 1000
+      }
+    }
+    writeFileSync(temp, JSON.stringify(record, null, 2), { mode: 0o600 })
+    return await importCredentialFile(temp, {
+      dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined
+    })
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  } finally {
+    try {
+      rmSync(temp, { force: true })
+    } catch {
+      // Best effort: a leftover temp file is still mode 0600.
+    }
+  }
+}
+
+/**
+ * Launch the WorkBuddy desktop client so the user can sign in.
+ *
+ * Detached and unref'd: the plugin must not hold a handle on a GUI process, or
+ * restarting DSH would take the client with it. A missing executable is
+ * reported rather than treated as success, because "nothing happened" is the
+ * exact failure this button exists to remove.
+ *
+ * @param configured - the configured client path, when set.
+ * @returns whether the client was launched, with the path used.
+ */
+function openWorkBuddy(configured) {
+  const resolved = resolveWorkBuddyPath(configured)
+  if (resolved.path === undefined) {
+    return {
+      ok: false,
+      source: resolved.source,
+      error: '找不到 WorkBuddy 客户端。请在插件配置里填写 workbuddyPath 指向 WorkBuddy.exe。'
+    }
+  }
+  try {
+    const child = spawn(resolved.path, [], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: false
+    })
+    child.unref()
+    return { ok: true, path: resolved.path, source: resolved.source }
+  } catch (error) {
+    return {
+      ok: false,
+      path: resolved.path,
+      source: resolved.source,
+      error: `无法启动 WorkBuddy：${error instanceof Error ? error.message : String(error)}`
+    }
+  }
+}
+
+/**
+ * The next scheduled check, as an ISO instant.
+ *
+ * @param time - the configured `HH:mm` in CN time.
+ * @returns an ISO string, or null when the value is unusable.
+ */
+function describeNext(time) {
+  const next = nextOccurrence(time)
+  return next === undefined ? null : new Date(next).toISOString()
+}
+
+/**
+ * Read a JSON request body, tolerating an empty or oversized one.
+ *
+ * @param req - the incoming request.
+ * @returns the parsed object, or undefined.
+ */
+async function readJsonBody(req) {
+  const chunks = []
+  let size = 0
+  for await (const chunk of req) {
+    size += chunk.length
+    // A status action is a few bytes; anything larger is not one, and reading
+    // it would only waste memory.
+    if (size > 64 * 1024) return undefined
+    chunks.push(chunk)
+  }
+  if (chunks.length === 0) return undefined
+  try {
+    const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    return parsed !== null && typeof parsed === 'object' ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Build the agent-facing tools.
+ *
+ * These read the same snapshot the UI shows, so the agent and the page can
+ * never disagree about whether today's check-in happened.
+ *
+ * @param scheduler - the live scheduler.
+ * @param config - the deployment configuration.
+ * @returns the tool definitions.
+ */
+function checkinTools(scheduler, config) {
+  const render = (value) => [{
+    type: 'text',
+    text: typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+  }]
+
+  const status = defineTool({
+    name: 'buddyhub_checkin_status',
+    description: 'Report the WorkBuddy account and whether today\'s check-in reward has been claimed, including the current credit balance. Read-only.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          summary: { type: 'string', required: true, description: 'One-line human-readable status.' },
+          signedIn: { type: 'boolean', required: true, description: 'Whether a WorkBuddy login was readable.' },
+          account: { type: 'string', description: 'Signed-in account label.' },
+          checkedInToday: { type: 'boolean', required: true, description: 'Whether today\'s reward is claimed.' },
+          status: { type: 'string', description: 'Upstream-reported check-in state.' },
+          creditsToday: { type: 'number', description: 'Credits earned today.' },
+          creditsTotal: { type: 'number', description: 'Credits earned in the activity so far.' },
+          balance: { type: 'number', description: 'Remaining credit balance.' },
+          autoCheckin: { type: 'boolean', required: true, description: 'Whether automatic check-in is on.' },
+          error: { type: 'string', description: 'Diagnostic when something failed.' }
+        }
+      },
+      render: (_args, value) => render(value.summary)
+    },
+    execute() {
+      const snapshot = scheduler.snapshot()
+      const checkin = snapshot.checkin
+      const lines = []
+      if (snapshot.signedIn !== true) {
+        lines.push(snapshot.error ?? 'No WorkBuddy login is available.')
+      } else {
+        lines.push(`Account: ${snapshot.account?.label ?? 'unknown'}`)
+        lines.push(checkin === null || checkin === undefined
+          ? 'Check-in state is not known yet; the first check has not completed.'
+          : `Today (${checkin.date}): ${checkin.status}${checkin.checkedIn ? `, +${checkin.credits} credits` : ''}`)
+        if (typeof snapshot.balance === 'number') lines.push(`Balance: ${snapshot.balance} credits`)
+        if (typeof checkin?.streakDays === 'number' && checkin.streakDays > 0) lines.push(`Streak: ${checkin.streakDays} days`)
+      }
+      return Promise.resolve({
+        summary: lines.join(' | '),
+        signedIn: snapshot.signedIn === true,
+        ...(snapshot.account?.label === undefined ? {} : { account: snapshot.account.label }),
+        checkedInToday: checkin?.checkedIn === true,
+        ...(checkin?.status === undefined ? {} : { status: checkin.status }),
+        ...(typeof checkin?.credits === 'number' ? { creditsToday: checkin.credits } : {}),
+        ...(typeof checkin?.totalCredits === 'number' ? { creditsTotal: checkin.totalCredits } : {}),
+        ...(typeof snapshot.balance === 'number' ? { balance: snapshot.balance } : {}),
+        autoCheckin: snapshot.autoCheckin === true,
+        ...(snapshot.error === null || snapshot.error === undefined ? {} : { error: snapshot.error })
+      })
+    },
+    presentCall: () => ({ card: 'generic', title: 'Check WorkBuddy check-in status', kind: 'other' })
+  })
+
+  const runNow = defineTool({
+    name: 'buddyhub_checkin',
+    description: 'Run the WorkBuddy daily check-in now instead of waiting for the scheduled time. Claims the reward only if the server reports today as unclaimed, so it is safe to call repeatedly.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          summary: { type: 'string', required: true, description: 'One-line outcome.' },
+          claimed: { type: 'boolean', required: true, description: 'Whether this call claimed the reward.' },
+          checkedInToday: { type: 'boolean', required: true, description: 'Whether today\'s reward is now claimed.' },
+          credits: { type: 'number', description: 'Credits earned today.' },
+          balance: { type: 'number', description: 'Remaining credit balance.' },
+          error: { type: 'string', description: 'Diagnostic when the check-in failed.' }
+        }
+      },
+      render: (_args, value) => render(value.summary)
+    },
+    async execute(_args, exec) {
+      if (exec?.signal?.aborted === true) throw new Error('check-in cancelled')
+      const before = scheduler.snapshot()
+      const after = await scheduler.run({ force: true })
+      const claimed = after.checkin?.checkedIn === true && before.checkin?.checkedIn !== true
+      const summary = after.error !== null && after.error !== undefined
+        ? `Check-in failed: ${after.error}`
+        : claimed
+          ? `Checked in successfully; +${after.checkin?.credits ?? 0} credits today.`
+          : `Already checked in today (${after.checkin?.status ?? 'no reward due'}).`
+      return {
+        summary,
+        claimed,
+        checkedInToday: after.checkin?.checkedIn === true,
+        ...(typeof after.checkin?.credits === 'number' ? { credits: after.checkin.credits } : {}),
+        ...(typeof after.balance === 'number' ? { balance: after.balance } : {}),
+        ...(after.error === null || after.error === undefined ? {} : { error: after.error })
+      }
+    },
+    presentCall: () => ({ card: 'generic', title: 'Run WorkBuddy check-in', kind: 'other' })
+  })
+
+  const schedule = defineTool({
+    name: 'buddyhub_schedule',
+    description: 'Report the WorkBuddy check-in schedule: whether automatic check-in is enabled, how often it runs, and when the next scheduled check is due. Read-only.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          enabled: { type: 'boolean', required: true, description: 'Whether automatic check-in is on.' },
+          intervalMinutes: { type: 'number', required: true, description: 'Minutes between automatic checks.' },
+          checkinTime: { type: 'string', required: true, description: 'Configured CN-time boundary.' },
+          nextCheckinAt: { type: 'string', description: 'Next scheduled check, as an ISO instant.' },
+          summary: { type: 'string', required: true, description: 'One-line description.' }
+        }
+      },
+      render: (_args, value) => render(value.summary)
+    },
+    execute() {
+      const interval = config.intervalMinutes ?? 30
+      const enabled = config.autoCheckin !== false
+      const next = enabled ? describeNext(config.checkinTime) : null
+      return Promise.resolve({
+        enabled,
+        intervalMinutes: interval,
+        checkinTime: config.checkinTime ?? '09:00',
+        ...(next === null ? {} : { nextCheckinAt: next }),
+        summary: enabled
+          ? `Automatic check-in is on: every ${interval} minutes, next due ${next ?? 'unknown'}.`
+          : 'Automatic check-in is disabled; use buddyhub_checkin to run it manually.'
+      })
+    },
+    presentCall: () => ({ card: 'generic', title: 'Read WorkBuddy check-in schedule', kind: 'other' })
+  })
+
+  return [status, runNow, schedule]
+}

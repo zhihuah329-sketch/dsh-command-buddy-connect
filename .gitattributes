@@ -1,0 +1,14 @@
+# Normalize line endings: the plugin runs on Windows but these files are also
+# read by editors on other platforms, so store LF and let checkout adapt.
+* text=auto eol=lf
+
+*.js    text eol=lf
+*.mjs   text eol=lf
+*.json  text eol=lf
+*.yml   text eol=lf
+*.md    text eol=lf
+
+# Certificates are generated per machine; if one is ever forced into the repo,
+# git must not rewrite its bytes.
+*.crt   binary
+*.key   binary

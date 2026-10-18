@@ -1,0 +1,18 @@
+# Register the plugin's model routes without changing the profile's current
+# default model.
+#
+#   dsh-command-buddy-connect   served in-process from the account vault
+#                               (no daemon needed)
+#   buddyhub                    served by the local BuddyHub daemon when it is
+#                               running
+#
+# The provider ids inside the plugin ("buddy-connect", "buddyhub") are wire
+# contracts, not plugin names: they appear in saved model ids, so renaming them
+# here would break every conversation that already selected one. Only the entry
+# id below tracks the package name.
+#
+# The plugin reads the daemon's own config.json for the live loopback port and
+# keys, so nothing here needs to repeat them.
+- insert:
+    - id: llm-dsh-command-buddy-connect
+      name: dsh-command-buddy-connect
