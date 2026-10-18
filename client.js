@@ -94,6 +94,11 @@ const FIRST_READ_RETRY_MS = 1200;
 			// ==== Section titles ==============================================
 			secCheckin: "今日签到",
 			checkinPerAccount: "本次签到账号",
+			checkinToggle: "参与签到",
+			checkinOnHint: "参与每日签到",
+			checkinOffHint: "不参与每日签到，但仍可用于模型调用",
+			checkinAllOn: "全部参与",
+			checkinAllOff: "全部停签",
 			secPools: "区域号池",
 			secModels: "模型线路",
 			modelsNote: "两个区域独立轮询，不会互相回退",
@@ -376,6 +381,11 @@ const FIRST_READ_RETRY_MS = 1200;
 .bh-chip-sub { font-size:10px; color:var(--dsw-alias-label-secondary); margin-top:2px; font-variant-numeric:tabular-nums; }
 
 /* ---- key/value rows ---- */
+.bh-checkin-bulk { display:flex; align-items:center; gap:8px; margin-bottom:10px; font-size:11px; }
+.bh-checkin-bulk-label { color:var(--dsw-alias-label-secondary); }
+.bh-btn-sm { padding:2px 8px; font-size:11px; }
+.bh-switch-sm { width:28px; height:16px; flex:0 0 auto; }
+.bh-switch-sm .bh-switch-knob { width:12px; height:12px; }
 .bh-checkin-per { margin-top:12px; padding-top:10px; border-top:1px solid var(--dsw-alias-border-l1); }
 .bh-checkin-per-head { font-size:11px; color:var(--dsw-alias-label-secondary); margin-bottom:6px; }
 .bh-checkin-row { display:flex; align-items:center; gap:8px; padding:4px 0; font-size:12px; }
@@ -797,6 +807,8 @@ const FIRST_READ_RETRY_MS = 1200;
 			// Capturing changes system state (a temporary trusted certificate),
 			// so it starts closed and requires an explicit confirmation.
 			const [captureOpen, setCaptureOpen] = React.useState(false);
+			// Which account's check-in switch is mid-write; null when idle.
+			const [prefsBusy, setPrefsBusy] = React.useState(null);
 
 			/**
 			 * Run a credential capture.
@@ -881,6 +893,33 @@ const FIRST_READ_RETRY_MS = 1200;
 
 			const toggleSection = (id) => {
 				setOpenSections((prev) => ({ ...prev, [id]: prev[id] !== true }));
+			};
+
+			/**
+			 * Turn one account's check-in participation on or off.
+			 *
+			 * The host persists it and the next run reads the new value, so no
+			 * remount is needed. The row re-renders only after the write
+			 * succeeds, so a failed save cannot leave the page showing a state
+			 * the host never stored.
+			 */
+			const toggleCheckin = (id, next) => {
+				if (prefsBusy !== null) return;
+				setPrefsBusy(id);
+				load("POST", { action: "checkin-prefs", id: id, enabled: next }, { spinner: false }).then(
+					() => setPrefsBusy(null),
+					() => setPrefsBusy(null)
+				);
+			};
+
+			/** Turn participation on or off for every account at once. */
+			const toggleCheckinAll = (next) => {
+				if (prefsBusy !== null) return;
+				setPrefsBusy("*");
+				load("POST", { action: "checkin-prefs", all: true, enabled: next }, { spinner: false }).then(
+					() => setPrefsBusy(null),
+					() => setPrefsBusy(null)
+				);
 			};
 
 			/** Open the client for one region, recording why when it fails. */
@@ -1221,6 +1260,13 @@ const FIRST_READ_RETRY_MS = 1200;
 				failed: "失败",
 				skipped: "已跳过"
 			};
+			// CN accounts are the ones that can check in at all; the AI region has
+			// no check-in activity behind its billing endpoint. Read straight from
+			// the status rather than `accountRows`, which is built further down.
+			const cnAccountRows = isObject(status) && isObject(status.accounts)
+				&& Array.isArray(status.accounts.accounts)
+				? status.accounts.accounts.filter((a) => a && a.site === "cn")
+				: [];
 			const checkinSection = status === null ? null : React.createElement(Fold,
 				{
 					title: TEXT.secCheckin,
@@ -1229,7 +1275,23 @@ const FIRST_READ_RETRY_MS = 1200;
 					open: openSections.checkin,
 					onToggle: () => toggleSection("checkin")
 				},
-				chips.length > 0 ? React.createElement("div", { className: "bh-chips", style: { marginBottom: "12px" } },
+				// Bulk control for participation, since a user with several
+				// accounts otherwise has to flip each row individually.
+				cnAccountRows.length > 0
+					? React.createElement("div", { className: "bh-checkin-bulk" },
+						React.createElement("span", { className: "bh-checkin-bulk-label" },
+							TEXT.checkinToggle + "：" + cnAccountRows.filter((a) => a.checkinEnabled !== false).length + " / " + cnAccountRows.length),
+						React.createElement("button", {
+							type: "button", className: "bh-btn bh-btn-sm",
+							disabled: prefsBusy !== null,
+							onClick: () => toggleCheckinAll(true)
+						}, TEXT.checkinAllOn),
+						React.createElement("button", {
+							type: "button", className: "bh-btn bh-btn-sm",
+							disabled: prefsBusy !== null,
+							onClick: () => toggleCheckinAll(false)
+						}, TEXT.checkinAllOff))
+					: null,				chips.length > 0 ? React.createElement("div", { className: "bh-chips", style: { marginBottom: "12px" } },
 					chips.map((chip) => React.createElement("div", {
 						className: "bh-chip bh-chip-" + chip.tone, key: chip.key
 					},
@@ -1341,7 +1403,22 @@ const FIRST_READ_RETRY_MS = 1200;
 						),
 						React.createElement("span", { className: "bh-badge bh-badge-" + tone },
 							React.createElement("i", { className: "bh-badge-dot" }),
-							text)
+							text),
+						// Check-in participation, independent of the account's own
+						// usability: an account can serve model calls and still be
+						// excluded from the daily reward.
+						site === "cn"
+							? React.createElement("button", {
+								type: "button",
+								className: "bh-switch bh-switch-sm" + (a.checkinEnabled === false ? "" : " bh-switch-on"),
+								role: "switch",
+								"aria-checked": a.checkinEnabled === false ? "false" : "true",
+								"aria-label": TEXT.checkinToggle + " " + String(a.label),
+								title: a.checkinEnabled === false ? TEXT.checkinOffHint : TEXT.checkinOnHint,
+								disabled: prefsBusy !== null,
+								onClick: () => toggleCheckin(a.id, a.checkinEnabled === false)
+							}, React.createElement("span", { className: "bh-switch-knob" }))
+							: null
 					);
 				}));
 			};

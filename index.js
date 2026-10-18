@@ -52,6 +52,7 @@ import { fileURLToPath } from 'node:url'
 import { DaemonAdapter, PROVIDER_ID, PROVIDER_NAME } from './lib/adapter.js'
 import { LocalPoolAdapter, LOCAL_PROVIDER_ID, LOCAL_PROVIDER_NAME } from './lib/local-adapter.js'
 import { CheckinScheduler, nextOccurrence } from './lib/scheduler.js'
+import { CheckinPrefs } from './lib/checkin-prefs.js'
 import { daemonTools } from './lib/tools.js'
 import { poolTools } from './lib/pool-tools.js'
 import { accountOverview, authorizationPlan, discoverCredentials, importCredentialFile, importCredentials, resolveClientForSite, resolveWorkBuddyPath } from './lib/account-status.js'
@@ -135,10 +136,16 @@ export const Config = z.object({
  * @param config - the validated deployment configuration.
  */
 export function apply(ctx, config) {
+  // Per-account check-in opt-out. Kept separate from the vault's own `enabled`
+  // flag, which means "may serve model calls" — sharing it would force a user
+  // to disable an account entirely just to stop auto-claiming its reward.
+  const checkinPrefs = new CheckinPrefs({ logger: ctx.logger })
+
   const scheduler = new CheckinScheduler({
     enabled: config.autoCheckin !== false,
     intervalMs: (config.intervalMinutes ?? 30) * 60 * 1000,
     logger: ctx.logger,
+    prefs: checkinPrefs,
     // Check-in prefers the CN account already imported into the daemon, which
     // needs no other plugin and no Electron binary.
     dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined,
@@ -244,7 +251,20 @@ export function apply(ctx, config) {
           const body = await readJsonBody(req)
           if (body?.action === 'checkin') await scheduler.run({ force: true })
           else if (body?.action === 'refresh') await scheduler.run()
-          else if (body?.action === 'authorize') {
+          else if (body?.action === 'checkin-prefs') {
+            // Which accounts take part in the daily run. This is separate from
+            // the vault's own `enabled` flag, which governs model calls.
+            if (body?.all === true) {
+              const vault = readVault(config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined)
+              const ids = vault.ok === true ? vault.accounts.map((a) => a.id) : []
+              checkinPrefs.setAll(ids, body.enabled !== false)
+            } else {
+              if (typeof body?.id !== 'string' || body.id.length === 0) {
+                return send(400, { ...scheduler.snapshot(), error: '缺少账号 id。' })
+              }
+              checkinPrefs.set(body.id, body.enabled !== false)
+            }
+          } else if (body?.action === 'authorize') {
             // Authorization is per region: the two clients are separate
             // installs, and opening the CN client to authorize an AI account
             // would show the wrong sign-in screen.
@@ -427,9 +447,20 @@ export function apply(ctx, config) {
           nextCheckinAt: config.autoCheckin === false ? null : describeNext(config.checkinTime),
           ...(localPool === undefined ? {} : { pools: localPool.poolStatus() }),
           // Derived status is the authority the page and the tools both read.
-          accounts: accountOverview({
-            dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined
-          }),
+          // Each account also carries its check-in preference, so the page can
+          // render the switch without a second request.
+          accounts: (() => {
+            const overview = accountOverview({
+              dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined
+            })
+            return {
+              ...overview,
+              accounts: (overview.accounts ?? []).map((a) => ({
+                ...a,
+                checkinEnabled: checkinPrefs.includes(a.id)
+              }))
+            }
+          })(),
           workbuddy: {
             ...resolveWorkBuddyPath(config.workbuddyPath),
             // Per-region client resolution, so each region's authorize button
