@@ -93,6 +93,7 @@ const FIRST_READ_RETRY_MS = 1200;
 			poolsEmpty: "还没有导入任何账号。",
 			// ==== Section titles ==============================================
 			secCheckin: "今日签到",
+			checkinPerAccount: "本次签到账号",
 			secPools: "区域号池",
 			secModels: "模型线路",
 			modelsNote: "两个区域独立轮询，不会互相回退",
@@ -375,6 +376,12 @@ const FIRST_READ_RETRY_MS = 1200;
 .bh-chip-sub { font-size:10px; color:var(--dsw-alias-label-secondary); margin-top:2px; font-variant-numeric:tabular-nums; }
 
 /* ---- key/value rows ---- */
+.bh-checkin-per { margin-top:12px; padding-top:10px; border-top:1px solid var(--dsw-alias-border-l1); }
+.bh-checkin-per-head { font-size:11px; color:var(--dsw-alias-label-secondary); margin-bottom:6px; }
+.bh-checkin-row { display:flex; align-items:center; gap:8px; padding:4px 0; font-size:12px; }
+.bh-checkin-site { flex:0 0 auto; font-size:10px; padding:1px 5px; border-radius:var(--dsw-radius-sm); background:var(--dsw-alias-bg-layer-2); color:var(--dsw-alias-label-secondary); }
+.bh-checkin-label { flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.bh-checkin-bal { flex:0 0 auto; color:var(--dsw-alias-label-secondary); font-variant-numeric:tabular-nums; }
 .bh-rows { display:flex; flex-direction:column; }
 .bh-row { display:flex; align-items:baseline; justify-content:space-between; gap:12px; padding:7px 0; border-bottom:1px dashed var(--dsw-alias-border-l1); font-size:12px; }
 .bh-row:last-child { border-bottom:none; padding-bottom:0; }
@@ -1197,6 +1204,23 @@ const FIRST_READ_RETRY_MS = 1200;
 					}
 				}
 			}
+			// How each per-account check-in outcome is shown. Deliberately a
+			// separate vocabulary from STATUS_TONE: this says what a run did,
+			// not whether an account is usable.
+			const CHECKIN_TONE = {
+				claimed: "ok",
+				already: "ok",
+				inactive: "warn",
+				failed: "err",
+				skipped: "idle"
+			};
+			const CHECKIN_TEXT = {
+				claimed: "签到成功",
+				already: "今日已签",
+				inactive: "活动未开放",
+				failed: "失败",
+				skipped: "已跳过"
+			};
 			const checkinSection = status === null ? null : React.createElement(Fold,
 				{
 					title: TEXT.secCheckin,
@@ -1213,7 +1237,30 @@ const FIRST_READ_RETRY_MS = 1200;
 						React.createElement("div", { className: "bh-chip-value", title: String(chip.value) }, chip.value),
 						chip.sub ? React.createElement("div", { className: "bh-chip-sub" }, chip.sub) : null
 					))) : null,
-				checkinRows.length > 0 ? React.createElement("div", { className: "bh-rows" }, checkinRows) : null
+				checkinRows.length > 0 ? React.createElement("div", { className: "bh-rows" }, checkinRows) : null,
+				// One line per account visited in the last run. A summary alone
+				// cannot show that one of three accounts failed, which is exactly
+				// what a multi-account run has to make obvious.
+				Array.isArray(status.checkinAccounts) && status.checkinAccounts.length > 0
+					? React.createElement("div", { className: "bh-checkin-per" },
+						React.createElement("div", { className: "bh-checkin-per-head" },
+							TEXT.checkinPerAccount + " " + status.checkinAccounts.length),
+						status.checkinAccounts.map((row) => React.createElement("div", {
+							key: String(row.id),
+							className: "bh-checkin-row"
+						},
+							React.createElement("span", { className: "bh-checkin-site" }, row.site === "ai" ? "AI" : "CN"),
+							React.createElement("span", { className: "bh-checkin-label" }, String(row.label)),
+							React.createElement("span", {
+								className: "bh-badge bh-badge-" + (CHECKIN_TONE[row.outcome] ?? "idle"),
+								title: isText(row.error) ? row.error : undefined
+							},
+								React.createElement("i", { className: "bh-badge-dot" }),
+								CHECKIN_TEXT[row.outcome] ?? String(row.outcome ?? "")),
+							isNum(row.balance) ? React.createElement("span", { className: "bh-checkin-bal" }, fmtNum(row.balance)) : null
+						))
+					)
+					: null
 			);
 
 			// ==== Section: pools =============================================

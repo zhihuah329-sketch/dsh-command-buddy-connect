@@ -141,7 +141,10 @@ export function apply(ctx, config) {
     logger: ctx.logger,
     // Check-in prefers the CN account already imported into the daemon, which
     // needs no other plugin and no Electron binary.
-    dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined
+    dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined,
+    // Every CN account in the pool is visited, not just the first one. AI is
+    // excluded because its billing endpoint rejects these calls with 401.
+    sites: ['cn']
   })
 
   ctx.effect(
