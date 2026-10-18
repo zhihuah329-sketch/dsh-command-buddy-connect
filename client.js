@@ -30,6 +30,16 @@ window.__ModuleLoader__.load({
 		 */
 		const POLL_MS = 60 * 1000;
 
+/**
+ * How the first read behaves while the host is still coming up.
+ *
+ * A cold start can refuse the very first request because the route is not
+ * registered yet. Retrying briefly turns that into a short delay instead of an
+ * error panel the user has to dismiss or wait out.
+ */
+const FIRST_READ_ATTEMPTS = 5;
+const FIRST_READ_RETRY_MS = 1200;
+
 		// ==== Localisable copy =================================================
 		// Every visible string lives here, so localising the card means editing
 		// this one object. The installed reference plugin of this shape
@@ -967,14 +977,48 @@ window.__ModuleLoader__.load({
 
 			// Poll while mounted. Unmounting (closing the plugin page) clears the
 			// timer, so a closed page never polls.
+			//
+			// The first read retries quickly rather than reporting failure at once:
+			// right after the host starts, its HTTP routes can still be settling,
+			// and one refused request used to surface as an error panel that stayed
+			// up until the next poll a whole minute later.
 			React.useEffect(() => {
 				let cancelled = false;
 				const guard = () => !cancelled;
-				load("GET", undefined, { guard: guard, spinner: true });
+				let retryTimer = null;
+				let attempts = 0;
+
+				const firstRead = () => {
+					if (!guard()) return;
+					attempts += 1;
+					request("GET").then((next) => {
+						if (!guard()) return;
+						setData(next);
+						setTransportError(null);
+						setLoading(false);
+					}, (error) => {
+						if (!guard()) return;
+						if (attempts < FIRST_READ_ATTEMPTS) {
+							retryTimer = setTimeout(firstRead, FIRST_READ_RETRY_MS);
+							return;
+						}
+						setTransportError(errText(error));
+						setLoading(false);
+					});
+				};
+
+				// A retry in flight must not be abandoned silently: `cancelled`
+				// already stops it, and the timer is cleared below.
+				firstRead();
 				const timer = setInterval(() => {
+					if (!guard()) return;
 					load("GET", undefined, { guard: guard, spinner: false });
 				}, POLL_MS);
-				return () => { cancelled = true; clearInterval(timer); };
+				return () => {
+					cancelled = true;
+					clearInterval(timer);
+					if (retryTimer !== null) clearTimeout(retryTimer);
+				};
 			}, []);
 
 			/** Claim today's reward now, then show the refreshed snapshot. */
