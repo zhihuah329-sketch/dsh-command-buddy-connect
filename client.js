@@ -412,6 +412,23 @@ const FIRST_READ_RETRY_MS = 1200;
 .bh-checkin-site { flex:0 0 auto; font-size:10px; padding:1px 5px; border-radius:var(--dsw-radius-sm); background:var(--dsw-alias-bg-layer-2); color:var(--dsw-alias-label-secondary); }
 .bh-checkin-label { flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .bh-checkin-bal { flex:0 0 auto; color:var(--dsw-alias-label-secondary); font-variant-numeric:tabular-nums; }
+
+/* ---- account row actions and the dialogs they open ---- */
+/* The account row is a flex row, so these sit at its far end without pushing
+   the label around. */
+.bh-acct-acts { display:flex; gap:4px; flex:0 0 auto; margin-left:6px; }
+.bh-btn-danger { border-color:var(--dsw-alias-state-error-primary); color:var(--dsw-alias-state-error-primary); }
+.bh-btn-danger:hover:not(:disabled) { background:var(--dsw-alias-state-error-primary); color:var(--dsw-alias-bg-layer-1); }
+/* A dialog placed inline in the flow is easy to miss entirely — it just becomes
+   another block in a long page. Fixed positioning with a dimmed backdrop is what
+   makes it read as a modal. */
+.bh-modal-back { position:fixed; inset:0; background:rgba(0,0,0,0.55); display:flex; align-items:center; justify-content:center; z-index:1000; padding:16px; }
+.bh-modal { background:var(--dsw-alias-bg-layer-1); border:1px solid var(--dsw-alias-border-l2); border-radius:var(--dsw-radius-lg); padding:16px 18px; max-width:440px; width:100%; box-shadow:0 8px 32px rgba(0,0,0,0.45); }
+.bh-modal-title { font-size:13px; font-weight:600; margin-bottom:8px; color:var(--dsw-alias-label-primary); }
+.bh-modal-name { font-size:12px; font-weight:600; color:var(--dsw-alias-brand-primary); margin:6px 0; word-break:break-all; }
+.bh-modal-body { font-size:11px; color:var(--dsw-alias-label-secondary); line-height:1.6; }
+.bh-modal-warn { font-size:11px; color:var(--dsw-alias-state-warn-primary); line-height:1.6; margin:8px 0 12px; }
+.bh-textarea { width:100%; margin:10px 0; resize:vertical; font-family:inherit; font-size:11px; word-break:break-all; box-sizing:border-box; }
 .bh-rows { display:flex; flex-direction:column; }
 .bh-row { display:flex; align-items:baseline; justify-content:space-between; gap:12px; padding:7px 0; border-bottom:1px dashed var(--dsw-alias-border-l1); font-size:12px; }
 .bh-row:last-child { border-bottom:none; padding-bottom:0; }
