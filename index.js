@@ -45,6 +45,7 @@
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { execFileSync, spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -56,7 +57,7 @@ import { CheckinPrefs } from './lib/checkin-prefs.js'
 import { removeAccount, updateAccountCredential } from './lib/vault-edit.js'
 import { daemonTools } from './lib/tools.js'
 import { poolTools } from './lib/pool-tools.js'
-import { accountOverview, authorizationPlan, discoverCredentials, importCredentialFile, importCredentials, resolveClientForSite, resolveWorkBuddyPath } from './lib/account-status.js'
+import { accountOverview, authorizationPlan, discoverCredentials, importCredentialFile, importCredentials, poolAlreadyHas, resolveClientForSite, resolveWorkBuddyPath } from './lib/account-status.js'
 import { CaptureSession, describeCapture, runCapture } from './lib/capture.js'
 import { CommandCodeAdapter, CC_PROVIDER_ID, CC_PROVIDER_NAME } from './lib/cc-adapter.js'
 import { RouteSwitches } from './lib/router-state.js'
@@ -881,6 +882,26 @@ function readDaemonConfig() {
 }
 
 /**
+ * The account id the daemon will derive for a captured credential.
+ *
+ * Mirrors `sha256(site:uid:enterpriseId)[:20]`, so the caller can check whether
+ * the pool already holds this exact credential before treating an all-zero
+ * import as a failure.
+ *
+ * @param capture - the capture result.
+ * @returns the id, or an empty string when the identity is unknown.
+ */
+function idForCapture(capture) {
+  const domain = String(capture.domain ?? '')
+  const site = /workbuddy\.ai/i.test(domain) ? 'ai' : 'cn'
+  if (typeof capture.uid !== 'string' || capture.uid.length === 0) return ''
+  return createHash('sha256')
+    .update(`${site}:${capture.uid}:${capture.enterpriseId ?? ''}`)
+    .digest('hex')
+    .slice(0, 20)
+}
+
+/**
  * Persist a captured credential into the daemon's pool.
  *
  * The capture yields a raw bearer token, which is what the proxy needs but not
@@ -900,6 +921,13 @@ async function writeCapturedCredential(capture, config) {
     // `site:uid:enterpriseId`. Both fields therefore have to be the real ones:
     // with either missing, the import derives a different id, creates an empty
     // duplicate, and the capture looks like it silently did nothing.
+    //
+    // `expiresAt` matters just as much. The daemon skips an import whose expiry
+    // is not later than the stored one, treating it as "nothing newer". Writing
+    // an invented value here (a flat 28 days) therefore skipped the import
+    // whenever the stored credential happened to last longer — and the skip was
+    // reported as success. The token's own `exp` is used when present.
+    const realExpiry = typeof capture.expiresAt === 'number' && capture.expiresAt > 0 ? capture.expiresAt : 0
     const record = {
       account: {
         uid: capture.uid ?? '',
@@ -908,13 +936,24 @@ async function writeCapturedCredential(capture, config) {
       auth: {
         accessToken: capture.token,
         domain: capture.domain ?? 'copilot.tencent.com',
-        expiresAt: Date.now() + 28 * 24 * 60 * 60 * 1000
+        expiresAt: realExpiry
       }
     }
     writeFileSync(temp, JSON.stringify(record, null, 2), { mode: 0o600 })
-    return await importCredentialFile(temp, {
+    const result = await importCredentialFile(temp, {
       dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined
     })
+    // A capture of the credential the pool already holds legitimately changes
+    // nothing, and reporting that as a failure would be just as misleading as
+    // reporting a failed write as success. The two are distinguishable.
+    if (result.ok !== true && poolAlreadyHas({
+      dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined,
+      accountId: idForCapture(capture),
+      accessToken: capture.token
+    })) {
+      return { ok: true, unchanged: true, before: result.before, after: result.after }
+    }
+    return result
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) }
   } finally {
