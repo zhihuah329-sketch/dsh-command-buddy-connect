@@ -108,7 +108,7 @@ dsh-command-buddy-connect:
   autoCheckin: true       # 启动时自动签到
   checkinTime: "09:00"    # 定时签到时间
   enableLocalPool: true   # 启用国内版 / 国际版号池
-  enableProvider: true    # 启用 本地守护进程线路
+  enableProvider: true    # 启用守护进程线路
   enableCommandCode: true # 启用 Command Code 线路
   commandCodeApiBase: "https://api.commandcode.ai"
   dataDir: null           # 账号库目录，默认 ~/.buddyhub
@@ -124,10 +124,15 @@ dsh-command-buddy-connect:
 
 | 工具 | 作用 |
 |---|---|
-| `daemon_status` | 查询签到状态与账号池健康 |
-| `daemon_checkin` | 立即执行签到 |
-| `daemon_accounts` | 列出各区域账号及状态 |
-| `daemon_import` | 从本机凭据文件导入账号 |
+| `checkin_status` | 查询签到状态与积分 |
+| `checkin_now` | 立即执行签到 |
+| `checkin_schedule` | 查看或调整定时签到 |
+| `pool_accounts` | 列出各区域账号及可用性 |
+| `pool_import` | 从本机凭据文件导入账号 |
+| `buddy_connect_pools` | 按区域汇总号池真实状态 |
+| `buddy_connect_diagnose_import` | 诊断单个凭据文件为何无法导入 |
+| `daemon_status` | 查询本地守护进程线路的健康 |
+| `daemon_logs` | 读取守护进程最近的日志 |
 
 ---
 
@@ -164,7 +169,7 @@ lib/
   account-status.js # 账号状态推导、凭据发现、导入
   capture.js        # 凭据抓取会话
   cert-gen.js       # 运行时证书生成（纯 JS DER 编码）
-  vault.js          # 守护进程 账号库解密
+  vault.js          # 账号库解密
 ```
 
 ### 设计原则
