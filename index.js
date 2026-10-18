@@ -44,15 +44,16 @@
 
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DaemonAdapter, PROVIDER_ID, PROVIDER_NAME } from './lib/adapter.js'
 import { LocalPoolAdapter, LOCAL_PROVIDER_ID, LOCAL_PROVIDER_NAME } from './lib/local-adapter.js'
 import { CheckinScheduler, nextOccurrence } from './lib/scheduler.js'
 import { CheckinPrefs } from './lib/checkin-prefs.js'
+import { removeAccount, updateAccountCredential } from './lib/vault-edit.js'
 import { daemonTools } from './lib/tools.js'
 import { poolTools } from './lib/pool-tools.js'
 import { accountOverview, authorizationPlan, discoverCredentials, importCredentialFile, importCredentials, resolveClientForSite, resolveWorkBuddyPath } from './lib/account-status.js'
@@ -264,12 +265,56 @@ export function apply(ctx, config) {
               }
               checkinPrefs.set(body.id, body.enabled !== false)
             }
+          } else if (body?.action === 'account-remove') {
+            // The daemon's admin API cannot delete an account, so the plugin
+            // writes the vault itself: stop the daemon, back up, write, restart.
+            const result = await removeAccount({
+              dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined,
+              accountId: body?.id
+            })
+            if (result.ok === true) {
+              // A removed account must not linger in the check-in preference
+              // file either.
+              checkinPrefs.set(body.id, true)
+              ctx.logger.info(`dsh-command-buddy-connect: 已删除账号 ${result.removed?.label ?? body.id}`)
+            }
+            return send(result.ok === true ? 200 : 400, {
+              ...scheduler.snapshot(),
+              ...(localPool === undefined ? {} : { pools: localPool.poolStatus() }),
+              accounts: accountOverview({
+                dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined
+              }),
+              accountEdit: result
+            })
+          } else if (body?.action === 'account-refresh') {
+            // Replace one account's token without touching anything else about
+            // it. Used when a credential was re-captured or re-exported.
+            const result = await updateAccountCredential({
+              dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined,
+              accountId: body?.id,
+              accessToken: body?.accessToken,
+              uid: body?.uid,
+              domain: body?.domain,
+              expiresAt: body?.expiresAt,
+              refreshToken: body?.refreshToken
+            })
+            if (result.ok === true) {
+              ctx.logger.info(`dsh-command-buddy-connect: 已刷新账号 ${result.updated?.label ?? body.id} 的凭据`)
+            }
+            return send(result.ok === true ? 200 : 400, {
+              ...scheduler.snapshot(),
+              ...(localPool === undefined ? {} : { pools: localPool.poolStatus() }),
+              accounts: accountOverview({
+                dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined
+              }),
+              accountEdit: result
+            })
           } else if (body?.action === 'authorize') {
             // Authorization is per region: the two clients are separate
             // installs, and opening the CN client to authorize an AI account
             // would show the wrong sign-in screen.
             const site = body?.site === 'ai' ? 'ai' : 'cn'
-            const opened = openWorkBuddyForSite(site, config.workbuddyPath)
+            const opened = await openWorkBuddyForSite(site, config.workbuddyPath)
             return send(opened.ok ? 200 : 400, {
               ...scheduler.snapshot(),
               ...(localPool === undefined ? {} : { pools: localPool.poolStatus() }),
@@ -589,7 +634,27 @@ function routeStates(config, state) {
   ]
 }
 
-function openWorkBuddyForSite(site, configured) {
+/**
+ * Launch the desktop client for one region, and confirm it actually started.
+ *
+ * ## Why not `spawn`
+ *
+ * WorkBuddy is an Electron app whose executable is a launcher. Launching it with
+ * `spawn` succeeds as a call and reports a pid, but the process exits with code
+ * 0 within a second and no window appears — the real app is only started when
+ * Windows resolves the launch through the shell (app paths, single-instance
+ * handoff, elevation). So the previous version reported "opened", the user saw
+ * nothing, and every step after it was unreachable.
+ *
+ * The shell is asked instead: `explorer.exe <path>` performs a normal shell
+ * launch. Because that call also returns immediately, the result is only
+ * reported as success after a process with the expected image name is observed.
+ *
+ * @param site - 'cn' or 'ai'.
+ * @param configured - the plugin's configured client path, when set.
+ * @returns whether a client is now running, with the path used.
+ */
+async function openWorkBuddyForSite(site, configured) {
   const read = readDaemonConfig()
   const resolved = resolveClientForSite({
     site,
@@ -603,17 +668,22 @@ function openWorkBuddyForSite(site, configured) {
       ok: false,
       site,
       source: resolved.source,
-      error: `找不到${name}客户端。请先在对应版本登录，或在插件配置里填写 workbuddyPath。`
+      error: `找不到${name}客户端。请先安装并登录对应版本，或在插件配置里填写 workbuddyPath。`
     }
   }
+
+  const image = basename(resolved.path).replace(/\.exe$/i, '')
+  // Already running: bringing it to the foreground is the client's own job, and
+  // launching a second copy would just hand off anyway.
+  if (isProcessRunning(image)) {
+    return { ok: true, site, path: resolved.path, source: resolved.source, name, alreadyRunning: true }
+  }
+
   try {
-    const child = spawn(resolved.path, [], {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: false
-    })
-    child.unref()
-    return { ok: true, site, path: resolved.path, source: resolved.source, name }
+    // `explorer` performs a shell launch and exits; its own exit code says
+    // nothing about the target, which is why the process check below decides.
+    const launcher = spawn('explorer.exe', [resolved.path], { detached: true, stdio: 'ignore', windowsHide: true })
+    launcher.unref()
   } catch (error) {
     return {
       ok: false,
@@ -624,6 +694,47 @@ function openWorkBuddyForSite(site, configured) {
       error: `无法启动${name}：${error instanceof Error ? error.message : String(error)}`
     }
   }
+
+  const started = await waitForProcess(image, START_PROCESS_TIMEOUT_MS)
+  if (!started) {
+    return {
+      ok: false,
+      site,
+      path: resolved.path,
+      source: resolved.source,
+      name,
+      error: `${name}没有启动。路径是 ${resolved.path}，请手动打开一次确认它能运行，或检查是否被安全软件拦截。`
+    }
+  }
+  return { ok: true, site, path: resolved.path, source: resolved.source, name }
+}
+
+/** How long to wait for the launched client to appear. */
+const START_PROCESS_TIMEOUT_MS = 20_000
+
+/** Whether a process with this image name is running. */
+function isProcessRunning(image) {
+  try {
+    const out = execFileSync('tasklist', ['/FI', `IMAGENAME eq ${image}.exe`, '/NH'], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 5000
+    })
+    // tasklist prints a "no tasks" line when the filter matches nothing.
+    return out.toLowerCase().includes(`${image.toLowerCase()}.exe`)
+  } catch {
+    return false
+  }
+}
+
+/** Poll until the process appears, or the deadline passes. */
+async function waitForProcess(image, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (isProcessRunning(image)) return true
+    await new Promise((resolve) => setTimeout(resolve, 700))
+  }
+  return isProcessRunning(image)
 }
 
 /** Read the two client paths the daemon recorded, ignoring an unreadable config. */

@@ -95,6 +95,24 @@ const FIRST_READ_RETRY_MS = 1200;
 			secCheckin: "今日签到",
 			checkinPerAccount: "本次签到账号",
 			checkinToggle: "参与签到",
+			refreshCred: "刷新凭证",
+			refreshing: "刷新中…",
+			refreshHint: "用新抓取或导出的令牌替换这个账号的凭据，其他字段不变",
+			remove: "删除",
+			removing: "删除中…",
+			removeHint: "从账号库移除这个账号，会先自动备份",
+			removeConfirmTitle: "确认删除账号",
+			removeConfirmBody: "将从账号库中移除：",
+			removeConfirmWarn: "删除前会自动备份，可从备份目录恢复。删除后该账号不再参与模型调用与签到。",
+			removeConfirm: "确认删除",
+			cancel: "取消",
+			refreshTitle: "刷新凭证",
+			refreshBody: "粘贴新的令牌。只替换凭据，标签、站点、统计都保留。",
+			refreshPlaceholder: "粘贴 accessToken（JWT，通常以 eyJ 开头）",
+			refreshApply: "应用",
+			refreshInvalid: "这看起来不像令牌：长度太短或含空白字符。",
+			editDone: "已更新，账号库已重新加载。",
+			editFailed: "操作失败",
 			checkinOnHint: "参与每日签到",
 			checkinOffHint: "不参与每日签到，但仍可用于模型调用",
 			checkinAllOn: "全部参与",
@@ -809,6 +827,13 @@ const FIRST_READ_RETRY_MS = 1200;
 			const [captureOpen, setCaptureOpen] = React.useState(false);
 			// Which account's check-in switch is mid-write; null when idle.
 			const [prefsBusy, setPrefsBusy] = React.useState(null);
+			// Account editing: which action is running, and the pending dialogs.
+			const [editBusy, setEditBusy] = React.useState(null);
+			const [removeFor, setRemoveFor] = React.useState(null);
+			const [refreshFor, setRefreshFor] = React.useState(null);
+			const [refreshDraft, setRefreshDraft] = React.useState("");
+			// Result of the last edit, shown as a notice above the sections.
+			const [editNote, setEditNote] = React.useState(null);
 
 			/**
 			 * Run a credential capture.
@@ -922,6 +947,50 @@ const FIRST_READ_RETRY_MS = 1200;
 				);
 			};
 
+			/**
+			 * Remove one account. The host stops the daemon, backs the vault up,
+			 * writes it, and restarts the daemon, so this can take a few seconds.
+			 */
+			const confirmRemove = (account) => {
+				if (editBusy !== null) return;
+				setEditBusy("remove:" + account.id);
+				setEditNote(null);
+				load("POST", { action: "account-remove", id: account.id }, { spinner: false }).then((snapshot) => {
+					setEditBusy(null);
+					setRemoveFor(null);
+					const result = snapshot !== null && isObject(snapshot.accountEdit) ? snapshot.accountEdit : null;
+					if (result === null || result.ok !== true) {
+						setEditNote({ ok: false, message: String(result?.error ?? TEXT.editFailed) });
+						return;
+					}
+					setEditNote({ ok: true, message: TEXT.editDone + (isText(result.backupDir) ? " 备份：" + result.backupDir : "") });
+					load("GET", undefined, { spinner: false });
+				}, () => { setEditBusy(null); setRemoveFor(null); });
+			};
+
+			/** Apply a replacement token to one account. */
+			const applyRefresh = () => {
+				if (editBusy !== null || refreshFor === null) return;
+				const token = isText(refreshDraft) ? refreshDraft.trim() : "";
+				if (token.length < 20 || /\s/.test(token)) {
+					setEditNote({ ok: false, message: TEXT.refreshInvalid });
+					return;
+				}
+				setEditBusy("refresh:" + refreshFor.id);
+				setEditNote(null);
+				load("POST", { action: "account-refresh", id: refreshFor.id, accessToken: token }, { spinner: false }).then((snapshot) => {
+					setEditBusy(null);
+					const result = snapshot !== null && isObject(snapshot.accountEdit) ? snapshot.accountEdit : null;
+					if (result === null || result.ok !== true) {
+						setEditNote({ ok: false, message: String(result?.error ?? TEXT.editFailed) });
+						return;
+					}
+					setRefreshFor(null);
+					setRefreshDraft("");
+					setEditNote({ ok: true, message: TEXT.editDone });
+					load("GET", undefined, { spinner: false });
+				}, () => setEditBusy(null));
+			};
 			/** Open the client for one region, recording why when it fails. */
 			const openClient = (site) => {
 				if (authBusy !== null) return;
@@ -1146,7 +1215,13 @@ const FIRST_READ_RETRY_MS = 1200;
 					key: "server", className: "bh-alert bh-alert-warn", role: "status"
 				}, serverError));
 			}
-			if (flash !== null) {
+			if (editNote !== null) {
+				alerts.push(React.createElement("div", {
+					key: "edit",
+					className: "bh-alert " + (editNote.ok === true ? "bh-alert-ok" : "bh-alert-error"),
+					role: "status"
+				}, String(editNote.message)));
+			}			if (flash !== null) {
 				alerts.push(React.createElement("div", {
 					key: "flash", className: "bh-alert bh-alert-ok", role: "status"
 				}, flash));
@@ -1418,7 +1493,24 @@ const FIRST_READ_RETRY_MS = 1200;
 								disabled: prefsBusy !== null,
 								onClick: () => toggleCheckin(a.id, a.checkinEnabled === false)
 							}, React.createElement("span", { className: "bh-switch-knob" }))
-							: null
+							: null,
+						// Per-account actions. Deleting cannot be undone from here,
+						// so it asks first and names the account in the question.
+						React.createElement("span", { className: "bh-acct-acts" },
+							React.createElement("button", {
+								type: "button",
+								className: "bh-btn bh-btn-sm",
+								disabled: editBusy !== null,
+								title: TEXT.refreshHint,
+								onClick: () => setRefreshFor(a)
+							}, editBusy === "refresh:" + a.id ? TEXT.refreshing : TEXT.refreshCred),
+							React.createElement("button", {
+								type: "button",
+								className: "bh-btn bh-btn-sm bh-btn-danger",
+								disabled: editBusy !== null,
+								title: TEXT.removeHint,
+								onClick: () => setRemoveFor(a)
+							}, editBusy === "remove:" + a.id ? TEXT.removing : TEXT.remove))
 					);
 				}));
 			};
@@ -1630,7 +1722,52 @@ const FIRST_READ_RETRY_MS = 1200;
 				problem !== null
 					? React.createElement(ProblemPanel, { kind: problem.kind, detail: problem.detail, status: status })
 					: null,
-				authOpen
+				// Confirmation dialogs live at the root so they are never clipped
+				// by a section's overflow.
+				removeFor !== null
+					? React.createElement("div", { className: "bh-modal-back", role: "dialog", "aria-modal": "true" },
+						React.createElement("div", { className: "bh-modal" },
+							React.createElement("div", { className: "bh-modal-title" }, TEXT.removeConfirmTitle),
+							React.createElement("div", { className: "bh-modal-body" }, TEXT.removeConfirmBody),
+							React.createElement("div", { className: "bh-modal-name" }, String(removeFor.label)),
+							React.createElement("div", { className: "bh-modal-warn" }, TEXT.removeConfirmWarn),
+							React.createElement("div", { className: "bh-key-row" },
+								React.createElement("button", {
+									type: "button", className: "bh-btn bh-btn-danger",
+									disabled: editBusy !== null,
+									onClick: () => confirmRemove(removeFor)
+								}, editBusy !== null ? TEXT.removing : TEXT.removeConfirm),
+								React.createElement("button", {
+									type: "button", className: "bh-btn",
+									disabled: editBusy !== null,
+									onClick: () => setRemoveFor(null)
+								}, TEXT.cancel))))
+					: null,
+				refreshFor !== null
+					? React.createElement("div", { className: "bh-modal-back", role: "dialog", "aria-modal": "true" },
+						React.createElement("div", { className: "bh-modal" },
+							React.createElement("div", { className: "bh-modal-title" }, TEXT.refreshTitle),
+							React.createElement("div", { className: "bh-modal-name" }, String(refreshFor.label)),
+							React.createElement("div", { className: "bh-modal-body" }, TEXT.refreshBody),
+							React.createElement("textarea", {
+								className: "bh-input bh-textarea",
+								rows: 4,
+								placeholder: TEXT.refreshPlaceholder,
+								value: refreshDraft,
+								onChange: (event) => setRefreshDraft(event.target.value)
+							}),
+							React.createElement("div", { className: "bh-key-row" },
+								React.createElement("button", {
+									type: "button", className: "bh-btn bh-btn-primary",
+									disabled: editBusy !== null,
+									onClick: () => applyRefresh()
+								}, editBusy !== null ? TEXT.refreshing : TEXT.refreshApply),
+								React.createElement("button", {
+									type: "button", className: "bh-btn",
+									disabled: editBusy !== null,
+									onClick: () => { setRefreshFor(null); setRefreshDraft(""); }
+								}, TEXT.cancel))))
+					: null,				authOpen
 					? React.createElement(AuthorizeDrawer, {
 						onClose: () => setAuthOpen(false),
 						onAction: (body) => load("POST", body),
