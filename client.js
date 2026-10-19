@@ -158,6 +158,10 @@ const FIRST_READ_RETRY_MS = 1200;
 			authPlanAiCapture: "国际版凭据读不到，请重新登录客户端。",
 			authPlanAiSignin: "还没有国际版凭据，请先登录客户端。",
 			authClientMissing: "未安装该版本客户端，点开查看说明",
+			// Stated on the page, not only in a tooltip on a disabled button.
+			authCnClientMissing: "未检测到国内版 WorkBuddy 客户端",
+			authAiClientMissing: "未检测到国际版 WorkBuddy 客户端",
+			authClientUsing: "将使用客户端：",
 			authImportRegion: "导入本区域凭据",
 			// The desktop app can hand over its own credential directly, which is
 			// the only route that works for a sealed CN token without a capture.
@@ -406,6 +410,14 @@ const FIRST_READ_RETRY_MS = 1200;
 .bh-capture-list { margin:6px 0 0; padding-left:18px; font-size:11px; line-height:1.7; color:var(--dsw-alias-label-secondary); }
 .bh-auth { margin-top:12px;  padding-top:12px; border-top:1px solid var(--dsw-alias-border-l1); }
 .bh-auth-hint { font-size:11px; color:var(--dsw-alias-label-secondary); line-height:1.6; }
+/* Which client a region will open, and what to do when there is none. A missing
+   client is the reason a region cannot be authorised, so it is not hidden in a
+   tooltip. */
+.bh-auth-client { margin-top:6px; font-size:10px; color:var(--dsw-alias-label-secondary); word-break:break-all; }
+.bh-auth-client code { font-size:10px; color:var(--dsw-alias-label-primary); }
+.bh-auth-missing { margin-top:6px; padding:6px 8px; border-radius:var(--dsw-radius-md); border:1px solid var(--dsw-alias-state-warn-primary); background:var(--dsw-alias-bg-layer-2); }
+.bh-auth-missing-title { font-size:11px; color:var(--dsw-alias-state-warn-primary); }
+.bh-auth-missing-hint { margin-top:3px; font-size:10px; color:var(--dsw-alias-label-secondary); line-height:1.6; }
 .bh-key { margin-top:12px;  padding-top:12px; border-top:1px solid var(--dsw-alias-border-l1); }
 .bh-key-title { font-size:12px; font-weight:600; color:var(--dsw-alias-label-primary); }
 .bh-key-hint { font-size:11px; color:var(--dsw-alias-label-secondary); margin-top:3px; }
@@ -1727,6 +1739,12 @@ const FIRST_READ_RETRY_MS = 1200;
 					? status.workbuddy[site]
 					: null;
 				const clientReady = client !== null && client.path !== undefined;
+				// A missing client is the reason this region cannot be authorised at
+				// all, so it is stated on the page. It used to live only in the
+				// button's tooltip — on a disabled button, which cannot be hovered in
+				// a way that reveals anything, so the region looked the same whether
+				// the client was missing or merely unconfigured.
+				const clientHint = client !== null && isText(client.hint) ? String(client.hint) : null;
 				const busyNow = authBusy !== null;
 				const route = plan === null ? null : plan.route;
 				const explain = route === null
@@ -1737,6 +1755,19 @@ const FIRST_READ_RETRY_MS = 1200;
 
 				return React.createElement("div", { className: "bh-auth" },
 					React.createElement("div", { className: "bh-auth-hint" }, explain),
+					// Stated before the buttons so it is read before a control that
+					// cannot work is pressed.
+					clientReady
+						? React.createElement("div", { className: "bh-auth-client" },
+							TEXT.authClientUsing,
+							" ",
+							React.createElement("code", null, String(client.path)))
+						: React.createElement("div", { className: "bh-auth-missing" },
+							React.createElement("div", { className: "bh-auth-missing-title" },
+								site === "cn" ? TEXT.authCnClientMissing : TEXT.authAiClientMissing),
+							clientHint !== null
+								? React.createElement("div", { className: "bh-auth-missing-hint" }, clientHint)
+								: null),
 					React.createElement("div", { className: "bh-key-row" },
 						React.createElement("button", {
 							type: "button",
@@ -1746,7 +1777,7 @@ const FIRST_READ_RETRY_MS = 1200;
 							onClick: () => openClient(site)
 						}, clientReady
 							? (authBusy === "open-" + site ? TEXT.authorizing : (site === "cn" ? TEXT.authCn : TEXT.authAi))
-							: TEXT.authClientMissing),
+							: (site === "cn" ? TEXT.authCnClientMissing : TEXT.authAiClientMissing)),
 						React.createElement("button", {
 							type: "button",
 							className: "bh-btn",
