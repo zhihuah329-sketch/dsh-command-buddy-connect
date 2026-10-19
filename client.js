@@ -879,7 +879,10 @@ const FIRST_READ_RETRY_MS = 1200;
 			const [discovery, setDiscovery] = React.useState(null);
 			// Capturing changes system state (a temporary trusted certificate),
 			// so it starts closed and requires an explicit confirmation.
-			const [captureOpen, setCaptureOpen] = React.useState(false);
+			// Which region's capture panel is open, or null. A single boolean made
+			// opening it under 国内版 also open it under 国际版, which reads as the
+			// two regions being linked when they are not.
+			const [captureOpenFor, setCaptureOpenFor] = React.useState(null);
 			// Which account's check-in switch is mid-write; null when idle.
 			const [prefsBusy, setPrefsBusy] = React.useState(null);
 			// Account editing: which action is running, and the pending dialogs.
@@ -967,7 +970,7 @@ const FIRST_READ_RETRY_MS = 1200;
 									message: written.created === true ? TEXT.captureCreated : TEXT.captureUpdated
 								});
 							}
-							setCaptureOpen(false);
+							setCaptureOpenFor(null);
 							load("GET", undefined, { spinner: false });
 							return;
 						}
@@ -1080,11 +1083,18 @@ const FIRST_READ_RETRY_MS = 1200;
 			};
 
 			/** Scan credential files and keep the per-region plan. */
-			const scanAll = () => {
+			/**
+			 * Scan credential files for one region.
+			 *
+			 * Scoping matters: an unscoped scan reports every region's files, and
+			 * the following import then writes all of them — so pressing this
+			 * under 国内版 also touched the 国际版 account.
+			 */
+			const scanAll = (site) => {
 				if (authBusy !== null) return;
-				setAuthBusy("scan");
+				setAuthBusy("scan-" + site);
 				setAuthNote(null);
-				load("POST", { action: "discover" }).then((snapshot) => {
+				load("POST", { action: "discover", site: site }).then((snapshot) => {
 					setAuthBusy(null);
 					const found = snapshot !== null && isObject(snapshot.discovery) ? snapshot.discovery : null;
 					setDiscovery(found);
@@ -1094,12 +1104,12 @@ const FIRST_READ_RETRY_MS = 1200;
 				}, () => setAuthBusy(null));
 			};
 
-			/** Import whatever is importable, reporting the real outcome. */
-			const importAll = () => {
+			/** Import the credential files of one region, reporting the real outcome. */
+			const importAll = (site) => {
 				if (authBusy !== null) return;
-				setAuthBusy("import");
+				setAuthBusy("import-" + site);
 				setAuthNote(null);
-				load("POST", { action: "import" }).then((snapshot) => {
+				load("POST", { action: "import", site: site }).then((snapshot) => {
 					setAuthBusy(null);
 					const result = snapshot !== null && isObject(snapshot.importResult) ? snapshot.importResult : null;
 					if (result === null) {
@@ -1741,15 +1751,15 @@ const FIRST_READ_RETRY_MS = 1200;
 							type: "button",
 							className: "bh-btn",
 							disabled: busyNow,
-							onClick: () => { scanAll(); }
-						}, authBusy === "scan" ? TEXT.authScanning : TEXT.authScan),
+							onClick: () => { scanAll(site); }
+						}, authBusy === "scan-" + site ? TEXT.authScanning : TEXT.authScan),
 						React.createElement("button", {
 							type: "button",
 							className: "bh-btn",
 							disabled: busyNow || plan === null || plan.fileImport !== true,
 							title: plan !== null && plan.fileImport === true ? "" : String(explain),
-							onClick: () => { importAll(); }
-						}, authBusy === "import" ? TEXT.authImporting : TEXT.authImportRegion),
+							onClick: () => { importAll(site); }
+						}, authBusy === "import-" + site ? TEXT.authImporting : TEXT.authImportRegion),
 						// The desktop-app route: it is the one that works for a sealed
 						// CN token, so it is offered for both regions and placed
 						// before the capture, which is the fallback of last resort.
@@ -1767,11 +1777,11 @@ const FIRST_READ_RETRY_MS = 1200;
 								type: "button",
 								className: "bh-btn",
 								disabled: busyNow,
-								onClick: () => setCaptureOpen(!captureOpen)
-							}, captureOpen ? TEXT.captureCancel : TEXT.captureBtn)
+								onClick: () => setCaptureOpenFor(captureOpenFor === site ? null : site)
+							}, captureOpenFor === site ? TEXT.captureCancel : TEXT.captureBtn)
 							: null
 					),
-					captureOpen && plan !== null && plan.captureRequired === true
+					captureOpenFor === site && plan !== null && plan.captureRequired === true
 						? React.createElement("div", { className: "bh-capture" },
 							// A network-layer tunnel makes the whole method useless, so
 							// say so before the user restarts the client rather than
@@ -1805,7 +1815,7 @@ const FIRST_READ_RETRY_MS = 1200;
 									disabled: false,
 									onClick: () => {
 										if (authBusy === "capture") cancelCaptureNow();
-										else setCaptureOpen(false);
+										else setCaptureOpenFor(null);
 									}
 								}, TEXT.captureCancel)
 							))

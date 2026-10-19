@@ -404,8 +404,12 @@ export function apply(ctx, config) {
               captureResult: { ...result, token: undefined, written }
             })
           } else if (body?.action === 'discover') {
+            // `site` scopes the scan to one region. Scanning everything and then
+            // importing everything is what made a per-region button reach into
+            // the other region's account.
             const discovery = discoverCredentials({
               authDirs: config.authDirs,
+              ...(body?.site === 'cn' || body?.site === 'ai' ? { site: body.site } : {}),
               dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined
             })
             return send(200, {
@@ -505,8 +509,13 @@ export function apply(ctx, config) {
           } else if (body?.action === 'import') {
             // Delegated to the daemon's own route: it owns and caches the vault,
             // so an outside write would be overwritten on its next save.
+            //
+            // `site` keeps the import inside the region whose button was pressed.
+            // Importing every discoverable file regardless is what made the
+            // 国内版 button rewrite the 国际版 account too.
             const result = await importCredentials({
               authDirs: config.authDirs,
+              ...(body?.site === 'cn' || body?.site === 'ai' ? { site: body.site } : {}),
               dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined
             })
             return send(200, {
