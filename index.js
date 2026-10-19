@@ -248,12 +248,41 @@ export function apply(ctx, config) {
     kind: 'exact',
     path: STATUS_PATH,
     handler: async (req, res) => {
+      /**
+       * Which desktop client each region will open.
+       *
+       * ## Why this is a function and not inline in the GET payload
+       *
+       * Every POST action replaces the page's status object with its own reply.
+       * Those replies omitted `workbuddy`, so after any button press the page
+       * could no longer tell whether a client existed and reported
+       * 「未检测到…客户端」 for both regions — even though the client was right
+       * there and the GET route had just said so. Resolving it in one place and
+       * merging it into every reply keeps the page's view consistent with what
+       * the buttons will actually do.
+       */
+      const clientState = () => ({
+        ...resolveWorkBuddyPath(config.workbuddyPath),
+        cn: resolveClientForSite({ site: 'cn', configured: config.workbuddyPath, ...daemonClients }),
+        ai: resolveClientForSite({
+          site: 'ai',
+          intlPath: config.workbuddyIntlPath,
+          configured: config.workbuddyPath,
+          ...daemonClients
+        })
+      })
+
       const send = (status, payload) => {
+        // A reply that already carries `workbuddy` keeps its own value; anything
+        // else gets the current one so the page never loses sight of the clients.
+        const merged = isPlainObject(payload) && payload.workbuddy === undefined
+          ? { ...payload, workbuddy: clientState() }
+          : payload
         res.writeHead(status, {
           'content-type': 'application/json; charset=utf-8',
           'cache-control': 'no-store'
         })
-        res.end(JSON.stringify(payload))
+        res.end(JSON.stringify(merged))
       }
       try {
         if (req.method === 'POST') {
@@ -618,18 +647,7 @@ export function apply(ctx, config) {
               }))
             }
           })(),
-          workbuddy: {
-            ...resolveWorkBuddyPath(config.workbuddyPath),
-            // Per-region client resolution, so each region's authorize button
-            // can say which client it will open before it is pressed.
-            cn: resolveClientForSite({ site: 'cn', configured: config.workbuddyPath, ...daemonClients }),
-            ai: resolveClientForSite({
-              site: 'ai',
-              intlPath: config.workbuddyIntlPath,
-              configured: config.workbuddyPath,
-              ...daemonClients
-            })
-          },
+          workbuddy: clientState(),
           // The page owns the key field, so it needs to know whether one is
           // stored without ever receiving it. Read from disk on every request:
           // the mount-time value would be stale the moment the key changes.
@@ -696,6 +714,16 @@ export function apply(ctx, config) {
     `dsh-command-buddy-connect: WorkBuddy check-in ${config.autoCheckin === false ? 'disabled' : 'enabled'}; `
     + `local pool ${localPool === undefined ? 'disabled' : 'enabled'}; status at ${STATUS_PATH}`
   )
+}
+
+/**
+ * Whether a value is a plain object, so it can be safely spread.
+ *
+ * @param value - any value.
+ * @returns whether it is a non-array object.
+ */
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
 /**

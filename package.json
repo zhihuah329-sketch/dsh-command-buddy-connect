@@ -2,7 +2,7 @@
   "name": "dsh-command-buddy-connect",
   "displayName": "DSH Command Buddy Connect",
   "description": "DeepSeek Harness 的多账号模型线路插件：国内版 / 国际版 / Command Code 三条线路分区轮询与独立开关，WorkBuddy 每日自动签到，账号健康诊断，以及从桌面版直接读取凭据。A DeepSeek Harness plugin that serves model traffic through region-partitioned account pools with independent switches, adds WorkBuddy daily check-in, account health diagnosis, and reads credentials straight from the installed desktop app.",
-  "version": "4.5.0",
+  "version": "4.5.1",
   "type": "module",
   "private": false,
   "main": "index.js",
@@ -30,7 +30,7 @@
   },
   "scripts": {
     "test": "node --test test/proxy.test.js test/account-status.test.js test/command-code.test.js test/client-css.test.js test/capture-identity.test.js test/import-verdict.test.js",
-    "check": "node test/integrity-check.mjs && node test/cooldown-repro.mjs && node test/logs.check.mjs && node test/capture-write.check.mjs && node test/quota-rotation.check.mjs && node test/quota-status.check.mjs && node test/health-persist.check.mjs && node test/region-scope.check.mjs && node test/client-region.check.mjs && node test/authorize-ui.check.mjs && node test/import-without-daemon.check.mjs && node test/auto-switch.check.mjs && node test/account-label.check.mjs",
+    "check": "node test/integrity-check.mjs && node test/cooldown-repro.mjs && node test/logs.check.mjs && node test/capture-write.check.mjs && node test/quota-rotation.check.mjs && node test/quota-status.check.mjs && node test/health-persist.check.mjs && node test/region-scope.check.mjs && node test/client-region.check.mjs && node test/authorize-ui.check.mjs && node test/import-without-daemon.check.mjs && node test/auto-switch.check.mjs && node test/account-label.check.mjs && node test/status-payload.check.mjs",
     "check:live": "node test/logs.live.mjs",
     "check:call": "node test/live-call.check.mjs",
     "e2e": "node test/e2e-live.mjs",
