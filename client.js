@@ -205,6 +205,8 @@ const FIRST_READ_RETRY_MS = 1200;
 			// does not mean the account can serve a call, and the page must not
 			// invent its own answer.
 			statusOk: "可用",
+			statusQuota: "额度用尽",
+			quotaResetHint: "额度已用尽，上游将在此时重置：",
 			statusCooling: "冷却中",
 			statusExpired: "已过期",
 			statusSignin: "需重新登录",
@@ -493,6 +495,8 @@ const FIRST_READ_RETRY_MS = 1200;
 .bh-acct-main { flex:1 1 auto; min-width:0; }
 .bh-acct-name { font-size:12px; font-weight:600; color:var(--dsw-alias-label-primary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .bh-acct-sub { margin-top:3px; font-size:10px; color:var(--dsw-alias-label-secondary); font-variant-numeric:tabular-nums; }
+/* A spent quota needs to be readable without opening a tooltip. */
+.bh-acct-quota { margin-top:3px; font-size:10px; color:var(--dsw-alias-state-warn-primary); font-variant-numeric:tabular-nums; }
 .bh-site { flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; min-width:30px; height:20px; padding:0 6px; border-radius:var(--dsw-radius-sm); font-size:10px; font-weight:600; letter-spacing:0.03em; }
 .bh-site-cn { color:var(--dsw-alias-brand-primary); border:1px solid var(--dsw-alias-brand-primary); }
 .bh-site-ai { color:var(--dsw-alias-label-secondary); border:1px solid var(--dsw-alias-border-l2); }
@@ -1541,6 +1545,10 @@ const FIRST_READ_RETRY_MS = 1200;
 
 			const STATUS_TONE = {
 				ok: "ok",
+				// A spent quota is a hard stop, not a warning: nothing recovers
+				// until the upstream's window resets, so it must not look like
+				// the same thing as a one-minute cooldown.
+				"quota-exhausted": "err",
 				"cooling-down": "warn",
 				expired: "err",
 				"signin-required": "err",
@@ -1549,6 +1557,7 @@ const FIRST_READ_RETRY_MS = 1200;
 			};
 			const STATUS_TEXT = {
 				ok: TEXT.statusOk,
+				"quota-exhausted": TEXT.statusQuota,
 				"cooling-down": TEXT.statusCooling,
 				expired: TEXT.statusExpired,
 				"signin-required": TEXT.statusSignin,
@@ -1596,6 +1605,12 @@ const FIRST_READ_RETRY_MS = 1200;
 					const tone = STATUS_TONE[a.status] ?? "idle";
 					const text = STATUS_TEXT[a.status] ?? TEXT.statusUnknown;
 					const title = Array.isArray(a.reasons) && a.reasons.length > 0 ? a.reasons.join("\n") : undefined;
+					// A spent quota cannot be recovered by waiting a minute, so the
+					// reset time is shown on the row itself: a tooltip the user never
+					// opens is how an exhausted account stayed invisible.
+					const quotaReset = isNum(a.quotaResetAt) && a.quotaResetAt > Date.now()
+						? fmtWhen(new Date(a.quotaResetAt).toISOString())
+						: null;
 					return React.createElement("div", {
 						key: String(a.id),
 						className: "bh-acct" + (a.usable === true ? "" : " bh-acct-off"),
@@ -1606,7 +1621,11 @@ const FIRST_READ_RETRY_MS = 1200;
 							React.createElement("div", { className: "bh-acct-sub" },
 								TEXT.colCalls + " " + fmtNum(a.requests)
 								+ " · " + TEXT.colOkRate + " " + okRate(a)
-								+ " · " + TEXT.colExpiry + " " + expiryText(a))
+								+ " · " + TEXT.colExpiry + " " + expiryText(a)),
+							quotaReset !== null
+								? React.createElement("div", { className: "bh-acct-quota" },
+									TEXT.quotaResetHint + " " + quotaReset)
+								: null
 						),
 						React.createElement("span", { className: "bh-badge bh-badge-" + tone },
 							React.createElement("i", { className: "bh-badge-dot" }),
