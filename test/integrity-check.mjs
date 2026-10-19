@@ -121,12 +121,15 @@ const GLOBALS = new Set(['Headers', 'Request', 'Response', 'FormData', 'Blob', '
  * @returns the names that look undefined.
  */
 function findUndefinedCalls(source) {
+  // Order matters and is not obvious. Block comments are removed *first*: they
+  // contain prose with backticks (`账号 8c1f5b`), and stripping template literals
+  // first made those backticks pair up with real template literals further down,
+  // swallowing the code in between — which silently deleted a whole function
+  // definition from the scanned text and reported it as undefined.
   const code = source
-    // Template literals and comments carry prose that looks like calls
-    // ("the proxy emits frames and terminates"), so they are blanked out first.
-    .replace(/`(?:\\.|[^`\\])*`/g, '``')
     .replace(/\/\*[\s\S]*?\*\//g, ' ')
     .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')
+    .replace(/`(?:\\.|[^`\\])*`/g, '``')
   const scope = new Set()
   for (const m of code.matchAll(/(?:export\s+)?(?:async\s+)?function\*?\s+(\w+)/g)) scope.add(m[1])
   for (const m of code.matchAll(/(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=/g)) scope.add(m[1])
