@@ -121,5 +121,46 @@ console.log('\nthe 国际版 profile alone does not make the CN client internati
   check('CN does not claim the AI-attributed install', cn.path !== cnExe, String(cn.path))
 }
 
+console.log('\nthe international build installs under a different binary name:')
+{
+  // This is the real-world case that motivated the fix: 「WorkBuddy AI」 is a
+  // separate product that installs as WorkBuddyAI.exe, usually in a WorkBuddyAI
+  // directory. Searching only for WorkBuddy.exe could never find it.
+  const aiDir = join(installs, 'WorkBuddyAI')
+  fs.mkdirSync(aiDir, { recursive: true })
+  const aiExe = join(aiDir, 'WorkBuddyAI.exe')
+  fs.writeFileSync(aiExe, 'stub')
+
+  // No CodeBuddy profile at all: the client has never been signed in on this
+  // machine. The binary name alone proves the region.
+  fs.rmSync(aiProfile, { recursive: true, force: true })
+  const ai = resolveClientForSite({
+    site: 'ai',
+    appData: roaming,
+    candidates: [aiExe]
+  })
+  check('AI resolves by binary name alone', ai.path === aiExe, String(ai.path))
+  check('reported as identified by name', ai.source === 'named', ai.source)
+
+  const cn = resolveClientForSite({
+    site: 'cn',
+    appData: roaming,
+    candidates: [aiExe]
+  })
+  check('CN never takes WorkBuddyAI.exe', cn.path !== aiExe, String(cn.path))
+}
+
+console.log('\na plain WorkBuddy.exe is not enough to claim the international slot:')
+{
+  // `WorkBuddy.exe` is the CN name; accepting it for AI without corroboration is
+  // what would open the wrong client.
+  const ambiguous = resolveClientForSite({
+    site: 'ai',
+    appData: roaming,
+    candidates: [cnExe]
+  })
+  check('AI does not resolve from the ambiguous name', ambiguous.path !== cnExe, String(ambiguous.path))
+}
+
 fs.rmSync(root, { recursive: true, force: true })
 finish()

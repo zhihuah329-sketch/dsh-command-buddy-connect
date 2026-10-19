@@ -2,7 +2,7 @@
   "name": "dsh-command-buddy-connect",
   "displayName": "DSH Command Buddy Connect",
   "description": "DeepSeek Harness 的多账号模型线路插件：国内版 / 国际版 / Command Code 三条线路分区轮询与独立开关，WorkBuddy 每日自动签到，账号健康诊断，以及从桌面版直接读取凭据。A DeepSeek Harness plugin that serves model traffic through region-partitioned account pools with independent switches, adds WorkBuddy daily check-in, account health diagnosis, and reads credentials straight from the installed desktop app.",
-  "version": "4.3.0",
+  "version": "4.4.1",
   "type": "module",
   "private": false,
   "main": "index.js",
