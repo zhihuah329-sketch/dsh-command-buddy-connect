@@ -159,6 +159,13 @@ const FIRST_READ_RETRY_MS = 1200;
 			authPlanAiSignin: "还没有国际版凭据，请先登录客户端。",
 			authClientMissing: "未安装该版本客户端，点开查看说明",
 			authImportRegion: "导入本区域凭据",
+			// The desktop app can hand over its own credential directly, which is
+			// the only route that works for a sealed CN token without a capture.
+			authFromDesktop: "从桌面版读取",
+			authFromDesktopBusy: "读取中…",
+			authFromDesktopHint: "直接从已登录的 WorkBuddy 桌面版读取令牌并写入号池。不用抓包、不用改系统代理、不需要守护进程。",
+			authFromDesktopDone: "已从桌面版读取",
+			authFromDesktopFailed: "读取失败",
 			authorizing: "打开中…",
 			authScanning: "扫描中…",
 			authImporting: "导入中…",
@@ -255,6 +262,13 @@ const FIRST_READ_RETRY_MS = 1200;
 			captureStart: "开始抓取",
 			captureCancel: "取消",
 			captureOk: "已抓到凭据并写入号池。",
+			captureCreated: "已抓到凭据，并作为新账号写入号池。",
+			captureUpdated: "已抓到凭据，已更新号池里对应账号的令牌。",
+			// A capture that yields a token but cannot persist it is a different
+			// outcome from a capture that succeeded end to end, and saying "written"
+			// there is simply false.
+			captureGotButNotWritten: "已抓到凭据，但没能写入号池。",
+			captureGotNoWrite: "已抓到凭据，号池状态未确认，请刷新页面核对。",
 			tunnelTitle: "网络层代理正在运行，抓取无法生效",
 			captureFailed: "抓取失败",
 			captureWaiting: "正在等待凭据…请在 WorkBuddy 登录并发一条消息。",
@@ -349,6 +363,10 @@ const FIRST_READ_RETRY_MS = 1200;
 .bh-btn:disabled { cursor:not-allowed; opacity:0.4; }
 .bh-btn-primary { border-color:var(--dsw-alias-brand-primary); color:var(--dsw-alias-brand-primary); }
 .bh-btn-primary:hover:not(:disabled) { background:var(--dsw-alias-bg-layer-2); }
+/* The preferred route in a row of equally valid buttons: filled, so it reads as
+   the first thing to try rather than one option among many. */
+.bh-btn-strong { border-color:var(--dsw-alias-brand-primary); background:var(--dsw-alias-brand-primary); color:var(--dsw-alias-bg-layer-1); }
+.bh-btn-strong:hover:not(:disabled) { filter:brightness(1.1); }
 
 /* ---- collapsible sections ---- */
 .bh-fold { border:1px solid var(--dsw-alias-border-l1); border-radius:var(--dsw-radius-lg); background:var(--dsw-alias-bg-layer-1); overflow:hidden; }
@@ -927,9 +945,24 @@ const FIRST_READ_RETRY_MS = 1200;
 						setAuthBusy(null);
 						if (state.ok === true) {
 							const written = isObject(state.written) ? state.written : null;
-							setAuthNote(written !== null && written.ok !== true
-								? { ok: false, message: TEXT.captureOk + " " + String(written.error ?? "") }
-								: { ok: true, message: TEXT.captureOk });
+							// The capture and the pool write are two different steps, and
+							// conflating them produced a self-contradictory message:
+							// "已抓到凭据并写入号池。守护进程没有写入任何账号。" — claiming the
+							// write succeeded and that nothing was written in the same
+							// breath. Say which step actually failed.
+							if (written === null) {
+								setAuthNote({ ok: true, message: TEXT.captureGotNoWrite });
+							} else if (written.ok !== true) {
+								setAuthNote({
+									ok: false,
+									message: TEXT.captureGotButNotWritten + " " + String(written.error ?? "")
+								});
+							} else {
+								setAuthNote({
+									ok: true,
+									message: written.created === true ? TEXT.captureCreated : TEXT.captureUpdated
+								});
+							}
 							setCaptureOpen(false);
 							load("GET", undefined, { spinner: false });
 							return;
@@ -1074,6 +1107,38 @@ const FIRST_READ_RETRY_MS = 1200;
 						? { ok: true, message: TEXT.authImportDone + (changed > 0 ? "（新增 " + Number(result.added ?? 0) + "，更新 " + Number(result.updated ?? 0) + "）" : "") }
 						: { ok: false, message: String(result.error ?? TEXT.authImportFailed) });
 				}, () => setAuthBusy(null));
+			};
+
+			/**
+			 * Read one region's credential from the installed desktop app.
+			 *
+			 * Different from `importAll`: that reads credential *files*, which is
+			 * impossible for a sealed CN token. This asks the app itself, so it
+			 * works for CN without a capture and without the daemon.
+			 */
+			const importFromDesktop = (site) => {
+				if (authBusy !== null) return;
+				setAuthBusy("desktop-" + site);
+				setAuthNote(null);
+				load("POST", { action: "desktop-import", site: site }).then((snapshot) => {
+					setAuthBusy(null);
+					const result = snapshot !== null && isObject(snapshot.desktopImport) ? snapshot.desktopImport : null;
+					if (result === null) {
+						setAuthNote({ ok: false, message: TEXT.unknownError });
+						return;
+					}
+					// The host reports per-region outcomes; show them as written so
+					// a partial success (one region read, the other not signed in)
+					// does not read as a total failure.
+					setAuthNote({
+						ok: result.ok === true,
+						message: TEXT.authFromDesktopDone + "：" + String(result.summary ?? "")
+					});
+					if (result.ok === true) load("GET", undefined, { spinner: false });
+				}, () => {
+					setAuthBusy(null);
+					setAuthNote({ ok: false, message: TEXT.authFromDesktopFailed });
+				});
 			};
 
 			/**
@@ -1666,6 +1731,16 @@ const FIRST_READ_RETRY_MS = 1200;
 							title: plan !== null && plan.fileImport === true ? "" : String(explain),
 							onClick: () => { importAll(); }
 						}, authBusy === "import" ? TEXT.authImporting : TEXT.authImportRegion),
+						// The desktop-app route: it is the one that works for a sealed
+						// CN token, so it is offered for both regions and placed
+						// before the capture, which is the fallback of last resort.
+						React.createElement("button", {
+							type: "button",
+							className: "bh-btn bh-btn-strong",
+							disabled: busyNow,
+							title: TEXT.authFromDesktopHint,
+							onClick: () => { importFromDesktop(site); }
+						}, authBusy === "desktop-" + site ? TEXT.authFromDesktopBusy : TEXT.authFromDesktop),
 						// A capture is offered only where it is the honest route:
 						// when the credential file itself cannot be read.
 						plan !== null && plan.captureRequired === true

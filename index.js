@@ -55,6 +55,7 @@ import { LocalPoolAdapter, LOCAL_PROVIDER_ID, LOCAL_PROVIDER_NAME } from './lib/
 import { CheckinScheduler, nextOccurrence } from './lib/scheduler.js'
 import { CheckinPrefs } from './lib/checkin-prefs.js'
 import { removeAccount, updateAccountCredential, upsertCapturedCredential } from './lib/vault-edit.js'
+import { readDesktopCredential } from './lib/desktop-app.js'
 import { daemonTools } from './lib/tools.js'
 import { poolTools } from './lib/pool-tools.js'
 import { accountOverview, authorizationPlan, discoverCredentials, importCredentialFile, importCredentials, poolAlreadyHas, resolveClientForSite, resolveWorkBuddyPath } from './lib/account-status.js'
@@ -512,6 +513,75 @@ export function apply(ctx, config) {
               ...scheduler.snapshot(),
               ...(localPool === undefined ? {} : { pools: localPool.poolStatus() }),
               importResult: result,
+              accounts: accountOverview({
+                dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined
+              })
+            })
+          } else if (body?.action === 'desktop-import') {
+            // Read the credential straight from the installed desktop app.
+            //
+            // This is the only path that works for a CN account without a
+            // system-proxy capture: the app can produce the at-rest key for its
+            // own `$wbEncrypted` codec, so the sealed token is read rather than
+            // guessed at. It also needs no daemon, which is what makes the
+            // plugin self-sufficient.
+            const wanted = body?.site === 'cn' || body?.site === 'ai' ? [body.site] : ['cn', 'ai']
+            const results = []
+            for (const site of wanted) {
+              const read = await readDesktopCredential({
+                site,
+                ...(config.workbuddyPath !== undefined && config.workbuddyPath.length > 0
+                  ? { workbuddyPath: config.workbuddyPath }
+                  : {})
+              })
+              if (read.ok !== true) {
+                results.push({ site, ok: false, reason: read.reason, error: read.error })
+                continue
+              }
+              const credential = read.credential
+              if (credential.uid.length === 0) {
+                results.push({
+                  site,
+                  ok: false,
+                  reason: 'no-uid',
+                  error: '读到的凭据里没有账号标识（uid），无法确定写入哪个账号。'
+                })
+                continue
+              }
+              const written = await upsertCapturedCredential({
+                dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined,
+                site,
+                uid: credential.uid,
+                accessToken: credential.accessToken,
+                domain: credential.domain,
+                expiresAt: credential.expiresAt,
+                refreshToken: credential.refreshToken
+              })
+              results.push({
+                site,
+                ok: written.ok === true,
+                ...(written.written === undefined ? {} : {
+                  accountId: written.written.id,
+                  created: written.written.created === true
+                }),
+                expiresAt: credential.expiresAt,
+                refreshed: credential.refreshToken.length > 0,
+                ...(written.ok === true ? {} : { error: written.error }),
+                ...(written.warning === undefined ? {} : { warning: written.warning })
+              })
+            }
+            return send(200, {
+              ...scheduler.snapshot(),
+              ...(localPool === undefined ? {} : { pools: localPool.poolStatus() }),
+              desktopImport: {
+                ok: results.some((r) => r.ok === true),
+                results,
+                summary: results
+                  .map((r) => `${r.site === 'ai' ? '国际版' : '国内版'}：${r.ok === true
+                    ? (r.created === true ? '已新增账号' : '已更新账号令牌')
+                    : String(r.error ?? '失败')}`)
+                  .join('；')
+              },
               accounts: accountOverview({
                 dataDir: config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined
               })
