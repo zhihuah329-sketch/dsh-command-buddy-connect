@@ -2,7 +2,7 @@
   "name": "dsh-command-buddy-connect",
   "displayName": "DSH Command Buddy Connect",
   "description": "DeepSeek Harness 的多账号模型线路插件：国内版 / 国际版 / Command Code 三条线路分区轮询与独立开关，WorkBuddy 每日自动签到，账号健康诊断，以及国内版凭据抓取。A DeepSeek Harness plugin that serves model traffic through region-partitioned account pools with independent switches, adds WorkBuddy daily check-in, account health diagnosis, and on-machine credential capture.",
-  "version": "3.7.2",
+  "version": "3.8.0",
   "type": "module",
   "private": true,
   "main": "index.js",
@@ -21,7 +21,8 @@
   ],
   "scripts": {
     "test": "node --test test/proxy.test.js test/account-status.test.js test/command-code.test.js test/client-css.test.js test/capture-identity.test.js test/import-verdict.test.js",
-    "check": "node test/integrity-check.mjs",
+    "check": "node test/integrity-check.mjs && node test/cooldown-repro.mjs && node test/logs.check.mjs && node test/capture-write.check.mjs",
+    "check:live": "node test/logs.live.mjs",
     "e2e": "node test/e2e-live.mjs",
     "verify": "npm run test && npm run check",
     "pack:tgz": "npm pack --pack-destination dist"
@@ -45,8 +46,8 @@
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-llm": ">=0.1.1-rc.2 <0.3.0",
+    "@deepseek-ai/dsh-tools": ">=0.1.1-rc.2 <0.3.0",
     "@deepseek-ai/schemastery": "^3.18.2"
   }
 }

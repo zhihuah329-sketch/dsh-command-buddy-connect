@@ -108,6 +108,11 @@ const FIRST_READ_RETRY_MS = 1200;
 			cancel: "取消",
 			refreshTitle: "刷新凭证",
 			refreshBody: "粘贴新的令牌。只替换凭据，标签、站点、统计都保留。",
+			refreshSteps: "怎么拿到令牌：在 WorkBuddy 客户端登录后，按 F12 打开开发者工具 → Network（网络）→ 随便发一条消息 → 点该请求 → Headers → 复制 Request Headers 里 authorization 后面的那串（不含 Bearer）。",
+			refreshAlt: "国内版客户端的凭据是加密的，无法从文件里读出来，所以只有「抓取凭据」或这里粘贴两种方式。",
+			refreshExpiry: "当前记录的过期时间",
+			refreshNoExpiry: "当前记录没有有效期信息",
+			refreshState: "当前状态",
 			refreshPlaceholder: "粘贴 accessToken（JWT，通常以 eyJ 开头）",
 			refreshApply: "应用",
 			refreshInvalid: "这看起来不像令牌：长度太短或含空白字符。",
@@ -430,6 +435,12 @@ const FIRST_READ_RETRY_MS = 1200;
 .bh-modal-title { font-size:13px; font-weight:600; margin-bottom:8px; color:var(--dsw-alias-label-primary); }
 .bh-modal-name { font-size:12px; font-weight:600; color:var(--dsw-alias-brand-primary); margin:6px 0; word-break:break-all; }
 .bh-modal-body { font-size:11px; color:var(--dsw-alias-label-secondary); line-height:1.6; }
+/* Current account state above the paste box: what the user came here to fix. */
+.bh-modal-meta { display:flex; flex-direction:column; gap:2px; font-size:11px; color:var(--dsw-alias-label-secondary); margin:8px 0; padding:7px 9px; background:var(--dsw-alias-bg-layer-2); border-radius:var(--dsw-radius-md); line-height:1.6; }
+/* Numbered "how to get the token" steps. */
+.bh-modal-steps { font-size:11px; color:var(--dsw-alias-label-secondary); line-height:1.7; margin:10px 0 0; padding:8px 10px; border-left:2px solid var(--dsw-alias-brand-primary); background:var(--dsw-alias-bg-layer-2); border-radius:0 var(--dsw-radius-md) var(--dsw-radius-md) 0; }
+/* A quieter explanatory note, not a warning. */
+.bh-modal-note { font-size:11px; color:var(--dsw-alias-label-tertiary); line-height:1.6; margin:8px 0 0; }
 .bh-modal-warn { font-size:11px; color:var(--dsw-alias-state-warn-primary); line-height:1.6; margin:8px 0 12px; }
 .bh-textarea { width:100%; margin:10px 0; resize:vertical; font-family:inherit; font-size:11px; word-break:break-all; box-sizing:border-box; }
 .bh-rows { display:flex; flex-direction:column; }
@@ -1208,10 +1219,43 @@ const FIRST_READ_RETRY_MS = 1200;
 				};
 			} else if (status !== null && pools !== null && isObject(pools.pools)
 				&& pools.pools.cn === 0 && pools.pools.ai === 0) {
-				problem = {
-					kind: "两个区域号池都没有可用账号，模型调用会失败。",
-					detail: "请导入账号；若导入后仍为空，用 buddy_connect_diagnose_import 检查凭据文件。"
-				};
+				// A zero pool has three very different causes, and the old text
+				// sent every one of them to "import an account". An account that
+				// exists but is cooling down after a 429 needs the opposite
+				// advice: do nothing, wait, or re-capture. An account that is
+				// present but not usable needs a re-login, not an import.
+				const listed = Array.isArray(pools.accounts) ? pools.accounts : [];
+				const cooling = listed.filter((a) => isNum(a.cooldownUntil) && a.cooldownUntil > Date.now());
+				const signedOut = listed.filter((a) => a.authState === "需重新登录");
+				const disabled = listed.filter((a) => a.enabled === false);
+				if (listed.length === 0) {
+					problem = {
+						kind: "账号库里还没有任何账号，两个区域号池都是空的。",
+						detail: "请先导入账号；国际版凭据是明文，可以直接「导入到号池」；国内版凭据被加密，需要用「抓取凭据」或「刷新凭证」接入。"
+					};
+				} else if (cooling.length === listed.length) {
+					const soonest = Math.min(...cooling.map((a) => a.cooldownUntil));
+					const wait = Math.max(0, Math.ceil((soonest - Date.now()) / 1000));
+					problem = {
+						kind: "账号都已导入，但全部在冷却中，暂时没有可用账号。",
+						detail: "这不是缺账号，不需要重新导入。冷却最长的账号约 " + wait + " 秒后自动恢复；若一直在 429，说明上游限流，可在该账号上点「刷新凭证」换一枚新令牌。"
+					};
+				} else if (signedOut.length === listed.length) {
+					problem = {
+						kind: "账号都在，但上游要求重新登录。",
+						detail: "请到 WorkBuddy 客户端重新登录，然后回到这里对该账号点「刷新凭证」，或对国内版用「抓取凭据」。"
+					};
+				} else if (disabled.length === listed.length) {
+					problem = {
+						kind: "账号都被停用了，因此没有可用账号。",
+						detail: "在下面的账号列表里把要用的账号重新启用即可，不需要重新导入。"
+					};
+				} else {
+					problem = {
+						kind: "两个区域号池都没有可用账号，模型调用会失败。",
+						detail: "账号已导入但当前都不可用（见下方每个账号的状态）。若是「已过期」，点「刷新凭证」；若是「已移除」，说明该账号已被删除，需要重新导入。"
+					};
+				}
 			} else if (status !== null && checkin !== null && checkin.checkedIn !== true
 				&& isText(checkin.error)) {
 				problem = {
@@ -1781,7 +1825,24 @@ const FIRST_READ_RETRY_MS = 1200;
 						React.createElement("div", { className: "bh-modal" },
 							React.createElement("div", { className: "bh-modal-title" }, TEXT.refreshTitle),
 							React.createElement("div", { className: "bh-modal-name" }, String(refreshFor.label)),
+							// The account's current state first: the user came here
+							// because something failed, and knowing whether the
+							// token is expired, cooling down after a 429, or
+							// signed out decides whether a new token can help.
+							React.createElement("div", { className: "bh-modal-meta" },
+								React.createElement("div", null,
+									TEXT.refreshState + "：" + String(refreshFor.authState ?? "未知")
+									+ (isText(refreshFor.lastError) && refreshFor.lastError.length > 0 ? "（" + refreshFor.lastError + "）" : "")
+								),
+								React.createElement("div", null,
+									isNum(refreshFor.expiresAt) && refreshFor.expiresAt > 0
+										? TEXT.refreshExpiry + "：" + fmtWhen(new Date(refreshFor.expiresAt).toISOString())
+										: TEXT.refreshNoExpiry
+								)
+							),
 							React.createElement("div", { className: "bh-modal-body" }, TEXT.refreshBody),
+							React.createElement("div", { className: "bh-modal-steps" }, TEXT.refreshSteps),
+							React.createElement("div", { className: "bh-modal-note" }, TEXT.refreshAlt),
 							React.createElement("textarea", {
 								className: "bh-input bh-textarea",
 								rows: 4,

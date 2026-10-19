@@ -54,7 +54,7 @@ import { DaemonAdapter, PROVIDER_ID, PROVIDER_NAME } from './lib/adapter.js'
 import { LocalPoolAdapter, LOCAL_PROVIDER_ID, LOCAL_PROVIDER_NAME } from './lib/local-adapter.js'
 import { CheckinScheduler, nextOccurrence } from './lib/scheduler.js'
 import { CheckinPrefs } from './lib/checkin-prefs.js'
-import { removeAccount, updateAccountCredential } from './lib/vault-edit.js'
+import { removeAccount, updateAccountCredential, upsertCapturedCredential } from './lib/vault-edit.js'
 import { daemonTools } from './lib/tools.js'
 import { poolTools } from './lib/pool-tools.js'
 import { accountOverview, authorizationPlan, discoverCredentials, importCredentialFile, importCredentials, poolAlreadyHas, resolveClientForSite, resolveWorkBuddyPath } from './lib/account-status.js'
@@ -904,17 +904,64 @@ function idForCapture(capture) {
 /**
  * Persist a captured credential into the daemon's pool.
  *
- * The capture yields a raw bearer token, which is what the proxy needs but not
- * what the import route reads — that route expects a credential *file* in the
- * client's own JSON shape. So the token is written to a temporary file in that
- * shape, imported, and the file removed immediately: leaving a plaintext token
- * on disk would defeat the point of capturing it in memory.
+ * ## Two write paths, and why the direct one comes first
+ *
+ * The import route (`/admin/import`) refuses a credential whose `expiresAt` is
+ * not later than the stored one, and refuses it *silently*. A re-capture almost
+ * always hits that: the user re-signs-in to replace a rate-limited token, but
+ * the new token's lifetime is counted from now, so its `exp` lands earlier than
+ * a stored credential imported near the start of a longer window. The capture
+ * then reports failure ("没有写入任何账号") even though everything worked.
+ *
+ * So a capture is written straight into the vault through
+ * `upsertCapturedCredential`, which matches the account by the daemon's own id
+ * derivation and always applies the token. The import route stays as the
+ * fallback for the one case it handles better than a direct write: a credential
+ * the daemon considers genuinely newer, or a vault layout this plugin cannot
+ * parse. When the direct write fails for an environmental reason (daemon cannot
+ * be stopped, vault unreadable) the import route still gets a chance.
+ *
+ * The temporary file never outlives the call, so no plaintext token is left on
+ * disk.
  *
  * @param capture - the `runCapture` result.
  * @param config - the plugin configuration.
- * @returns what the daemon reported, or why nothing was written.
+ * @returns what was written, or why nothing was written.
  */
 async function writeCapturedCredential(capture, config) {
+  const dataDir = config.dataDir !== undefined && config.dataDir.length > 0 ? config.dataDir : undefined
+  const site = /workbuddy\.ai/i.test(String(capture.domain ?? '')) ? 'ai' : 'cn'
+
+  // Direct write first: it is the only path that reliably reflects a re-capture.
+  // Without a uid there is no id to match on, so that path is skipped entirely
+  // and the import route is asked to derive one from the file.
+  const hasUid = typeof capture.uid === 'string' && capture.uid.length > 0
+  let directError = null
+  if (hasUid) {
+    const direct = await upsertCapturedCredential({
+      dataDir,
+      site,
+      uid: capture.uid,
+      enterpriseId: capture.enterpriseId,
+      accessToken: capture.token,
+      domain: capture.domain,
+      expiresAt: capture.expiresAt,
+      refreshToken: capture.refreshToken
+    })
+    if (direct.ok === true) {
+      return {
+        ok: true,
+        via: 'vault',
+        created: direct.written?.created === true,
+        accountId: direct.written?.id,
+        backupDir: direct.backupDir,
+        restarted: direct.restarted,
+        ...(direct.warning === undefined ? {} : { warning: direct.warning })
+      }
+    }
+    directError = direct.error
+  }
+
   const temp = join(tmpdir(), `buddy-connect-captured-${Date.now()}.info`)
   try {
     // The daemon matches an import to an existing account by a hash of
@@ -951,9 +998,19 @@ async function writeCapturedCredential(capture, config) {
       accountId: idForCapture(capture),
       accessToken: capture.token
     })) {
-      return { ok: true, unchanged: true, before: result.before, after: result.after }
+      return { ok: true, via: 'import', unchanged: true, before: result.before, after: result.after }
     }
-    return result
+    if (result.ok !== true && directError !== null) {
+      // Both paths declined. The direct reason is the actionable one (the vault
+      // was locked or unwritable), so lead with it and keep the import's own
+      // complaint as supporting detail rather than replacing it.
+      return {
+        ...result,
+        via: 'import',
+        error: `${directError}${typeof result.error === 'string' && result.error.length > 0 ? `（导入接口：${result.error}）` : ''}`
+      }
+    }
+    return { ...result, via: 'import' }
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) }
   } finally {
