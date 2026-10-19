@@ -2,9 +2,9 @@
   "name": "dsh-command-buddy-connect",
   "displayName": "DSH Command Buddy Connect",
   "description": "DeepSeek Harness 的多账号模型线路插件：国内版 / 国际版 / Command Code 三条线路分区轮询与独立开关，WorkBuddy 每日自动签到，账号健康诊断，以及从桌面版直接读取凭据。A DeepSeek Harness plugin that serves model traffic through region-partitioned account pools with independent switches, adds WorkBuddy daily check-in, account health diagnosis, and reads credentials straight from the installed desktop app.",
-  "version": "4.1.1",
+  "version": "4.1.2",
   "type": "module",
-  "private": true,
+  "private": false,
   "main": "index.js",
   "exports": {
     ".": "./index.js",
@@ -17,8 +17,17 @@
     "lib",
     "assets",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "INSTALL.md"
   ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zhihuah329-sketch/dsh-command-buddy-connect.git"
+  },
   "scripts": {
     "test": "node --test test/proxy.test.js test/account-status.test.js test/command-code.test.js test/client-css.test.js test/capture-identity.test.js test/import-verdict.test.js",
     "check": "node test/integrity-check.mjs && node test/cooldown-repro.mjs && node test/logs.check.mjs && node test/capture-write.check.mjs && node test/quota-rotation.check.mjs && node test/quota-status.check.mjs && node test/health-persist.check.mjs && node test/region-scope.check.mjs",
@@ -50,5 +59,12 @@
     "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
     "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
     "@deepseek-ai/schemastery": "^3.18.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-llm": { "optional": false },
+    "@deepseek-ai/dsh-tools": { "optional": false }
+  },
+  "optionalDependencies": {
+    "dsh-workbuddy-connect": "^0.7.8"
   }
 }
