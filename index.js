@@ -126,7 +126,9 @@ export const Config = z.object({
   dataDir: z.string()
     .description('守护进程数据目录。留空则依次使用 BUDDYHUB_DATA、%USERPROFILE%\\.buddyhub.'),
   workbuddyPath: z.string()
-    .description('Path to the WorkBuddy desktop client, used by the "authorize account" button. Leave unset to use the vendor default, then a search of the usual install roots.'),
+    .description('Path to the 国内版 (CN) WorkBuddy desktop client, used by the "authorize account" button. Leave unset to use the vendor default, then a search of the usual install roots.'),
+  workbuddyIntlPath: z.string()
+    .description('Path to the 国际版 (international) WorkBuddy desktop client. The two regions are separate installs, so this cannot be shared with workbuddyPath. Leave unset to detect it by its profile directory.'),
   authDirs: z.array(z.string())
     .default([])
     .description('Extra directories to scan for WorkBuddy credential files when authorizing an account.'),
@@ -320,7 +322,7 @@ export function apply(ctx, config) {
             // installs, and opening the CN client to authorize an AI account
             // would show the wrong sign-in screen.
             const site = body?.site === 'ai' ? 'ai' : 'cn'
-            const opened = await openWorkBuddyForSite(site, config.workbuddyPath)
+            const opened = await openWorkBuddyForSite(site, config.workbuddyPath, config.workbuddyIntlPath)
             return send(opened.ok ? 200 : 400, {
               ...scheduler.snapshot(),
               ...(localPool === undefined ? {} : { pools: localPool.poolStatus() }),
@@ -621,7 +623,12 @@ export function apply(ctx, config) {
             // Per-region client resolution, so each region's authorize button
             // can say which client it will open before it is pressed.
             cn: resolveClientForSite({ site: 'cn', configured: config.workbuddyPath, ...daemonClients }),
-            ai: resolveClientForSite({ site: 'ai', configured: config.workbuddyPath, ...daemonClients })
+            ai: resolveClientForSite({
+              site: 'ai',
+              intlPath: config.workbuddyIntlPath,
+              configured: config.workbuddyPath,
+              ...daemonClients
+            })
           },
           // The page owns the key field, so it needs to know whether one is
           // stored without ever receiving it. Read from disk on every request:
@@ -766,24 +773,27 @@ function routeStates(config, state) {
  * reported as success after a process with the expected image name is observed.
  *
  * @param site - 'cn' or 'ai'.
- * @param configured - the plugin's configured client path, when set.
+ * @param configured - the plugin's configured CN client path, when set.
+ * @param intlConfigured - the plugin's configured international path, when set.
  * @returns whether a client is now running, with the path used.
  */
-async function openWorkBuddyForSite(site, configured) {
+async function openWorkBuddyForSite(site, configured, intlConfigured) {
   const read = readDaemonConfig()
   const resolved = resolveClientForSite({
     site,
+    intlPath: intlConfigured,
     configured,
     daemonPath: read.workbuddyExe,
     daemonIntlPath: read.workbuddyIntlExe
   })
   const name = site === 'ai' ? '国际版 WorkBuddy' : '国内版 WorkBuddy'
+  const setting = site === 'ai' ? 'workbuddyIntlPath' : 'workbuddyPath'
   if (resolved.path === undefined) {
     return {
       ok: false,
       site,
       source: resolved.source,
-      error: `找不到${name}客户端。请先安装并登录对应版本，或在插件配置里填写 workbuddyPath。`
+      error: resolved.hint ?? `找不到${name}客户端。请先安装并登录对应版本，或在插件配置里填写 ${setting}。`
     }
   }
 
